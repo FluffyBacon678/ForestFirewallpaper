@@ -1,0 +1,523 @@
+{
+    "title": "Forest Wildfire",
+    "description": "An interactive top-down wildfire wallpaper. Click anywhere to spark a fire — flames spread through grass and trees with the wind, embers fly, smoke billows, lightning strikes during storms, rain extinguishes flames, and the forest slowly regrows. Procedurally generated terrain (4 tree species, ponds, rivers, dirt paths, rocks, elevation shading, lily pads), weather cycles (clear / cloudy / rain / storm), and full RGB lighting sync for iCUE / Aura / Razer Chroma / Razer Synapse.",
+    "type": "web",
+    "file": "index.html",
+    "preview": "preview.jpg",
+    "tags": ["Nature", "Interactive", "Relaxing", "Pixel art"],
+    "visibility": "public",
+    "version": 3,
+    "general": {
+        "properties": {
+
+            "hdrPerf": {
+                "order":  0,
+                "text":   "──────── Performance ────────",
+                "type":   "text"
+            },
+            "quality": {
+                "order":  1,
+                "text":   "Quality preset",
+                "type":   "combo",
+                "value":  "high",
+                "options": [
+                    { "label": "Low (40% particles, mobile/iGPU friendly)", "value": "low"    },
+                    { "label": "Medium (70% particles, balanced)",          "value": "medium" },
+                    { "label": "High (100% particles, default)",            "value": "high"   },
+                    { "label": "Ultra (160% particles, for beefy GPUs)",    "value": "ultra"  }
+                ]
+            },
+            "fpsCap": {
+                "order":  2,
+                "text":   "Max FPS",
+                "type":   "combo",
+                "value":  "60",
+                "options": [
+                    { "label": "30 fps (battery saver)",  "value": "30"        },
+                    { "label": "60 fps (recommended)",    "value": "60"        },
+                    { "label": "120 fps (high refresh)",  "value": "120"       },
+                    { "label": "144 fps",                 "value": "144"       },
+                    { "label": "Unlimited (match monitor)", "value": "unlimited" }
+                ]
+            },
+
+            "hdrTerrain": {
+                "order": 10,
+                "text":   "──────── Terrain ────────",
+                "type":   "text"
+            },
+            "treeDensity": {
+                "order": 11,
+                "text":   "Tree density (lushness)",
+                "type":   "slider",
+                "value":  0.46,
+                "min":    0.0,
+                "max":    0.95,
+                "step":   0.01
+            },
+            "treeScale": {
+                "order": 12,
+                "text":   "Tree size (smaller = plantier)",
+                "type":   "slider",
+                "value":  0.80,
+                "min":    0.40,
+                "max":    1.60,
+                "step":   0.02
+            },
+            "grassDensity": {
+                "order": 13,
+                "text":   "Grass density",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.0,
+                "max":    1.0,
+                "step":   0.01
+            },
+            "rockDensity": {
+                "order": 14,
+                "text":   "Rock density",
+                "type":   "slider",
+                "value":  0.04,
+                "min":    0.0,
+                "max":    0.20,
+                "step":   0.005
+            },
+            "cellSize": {
+                "order": 15,
+                "text":   "Zoom (smaller = zoomed out / more lush)",
+                "type":   "slider",
+                "value":  10,
+                "min":    6,
+                "max":    24,
+                "step":   1
+            },
+            "showRivers": {
+                "order": 15,
+                "text":   "Generate rivers",
+                "type":   "bool",
+                "value":  true
+            },
+            "showLilyPads": {
+                "order": 16,
+                "text":   "Lily pads on water",
+                "type":   "bool",
+                "value":  true
+            },
+            "showPaths": {
+                "order": 17,
+                "text":   "Dirt paths through forest",
+                "type":   "bool",
+                "value":  true
+            },
+            "showRocks": {
+                "order": 18,
+                "text":   "Scatter rocks",
+                "type":   "bool",
+                "value":  true
+            },
+            "showElevation": {
+                "order": 19,
+                "text":   "Elevation shading (hills)",
+                "type":   "bool",
+                "value":  true
+            },
+
+            "hdrFire": {
+                "order": 20,
+                "text":   "──────── Fire ────────",
+                "type":   "text"
+            },
+            "spreadRate": {
+                "order": 21,
+                "text":   "Fire spread rate",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.2,
+                "max":    3.0,
+                "step":   0.05
+            },
+            "treeBurnDuration": {
+                "order": 22,
+                "text":   "Tree burn duration",
+                "type":   "slider",
+                "value":  1.5,
+                "min":    0.4,
+                "max":    4.0,
+                "step":   0.05
+            },
+            "grassBurnDuration": {
+                "order": 23,
+                "text":   "Grass burn duration",
+                "type":   "slider",
+                "value":  0.7,
+                "min":    0.2,
+                "max":    2.0,
+                "step":   0.05
+            },
+            "fireGlow": {
+                "order": 24,
+                "text":   "Fire glow intensity",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.0,
+                "max":    2.5,
+                "step":   0.05
+            },
+            "showFlamePlumes": {
+                "order": 25,
+                "text":   "Animated flame plumes",
+                "type":   "bool",
+                "value":  true
+            },
+            "showEmbers": {
+                "order": 26,
+                "text":   "Flying embers (can start spot fires)",
+                "type":   "bool",
+                "value":  true
+            },
+            "showSmoke": {
+                "order": 27,
+                "text":   "Smoke",
+                "type":   "bool",
+                "value":  true
+            },
+            "heatShimmer": {
+                "order": 28,
+                "text":   "Heat-haze shimmer above big fires (subtle; off by default)",
+                "type":   "bool",
+                "value":  false
+            },
+            "magicFire": {
+                "order": 29,
+                "text":   "Magic fire (coloured flames — 0 = normal, 1 = all magic)",
+                "type":   "slider",
+                "value":  0.0,
+                "min":    0.0,
+                "max":    1.0,
+                "step":   0.02
+            },
+
+            "hdrWind": {
+                "order": 30,
+                "text":   "──────── Wind ────────",
+                "type":   "text"
+            },
+            "windStrength": {
+                "order": 31,
+                "text":   "Wind strength",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.0,
+                "max":    3.0,
+                "step":   0.05
+            },
+            "windRotation": {
+                "order": 32,
+                "text":   "Wind direction shift speed",
+                "type":   "slider",
+                "value":  0.8,
+                "min":    0.0,
+                "max":    3.0,
+                "step":   0.05
+            },
+            "showWindParticles": {
+                "order": 33,
+                "text":   "Visible wind streaks",
+                "type":   "bool",
+                "value":  true
+            },
+            "showLeaves": {
+                "order": 34,
+                "text":   "Drifting leaves",
+                "type":   "bool",
+                "value":  true
+            },
+
+            "hdrWeather": {
+                "order": 40,
+                "text":   "──────── Weather ────────",
+                "type":   "text"
+            },
+            "weatherMode": {
+                "order": 41,
+                "text":   "Weather",
+                "type":   "combo",
+                "value":  "auto",
+                "options": [
+                    { "label": "Auto-cycle (drifts gradually)", "value": "auto"    },
+                    { "label": "Drought (sunny / dry / hot)",   "value": "drought" },
+                    { "label": "Clear",                         "value": "clear"   },
+                    { "label": "Cloudy",                        "value": "cloudy"  },
+                    { "label": "Rain",                          "value": "rain"    },
+                    { "label": "Monsoon (heavy rain)",          "value": "monsoon" },
+                    { "label": "Storm (rain + lightning)",      "value": "storm"   }
+                ]
+            },
+            "weatherDirection": {
+                "order": 42,
+                "text":   "Weather front direction",
+                "type":   "combo",
+                "value":  "leftToRight",
+                "options": [
+                    { "label": "Left → right (default)", "value": "leftToRight" },
+                    { "label": "Right → left",           "value": "rightToLeft" },
+                    { "label": "Top → bottom",           "value": "topToBottom" },
+                    { "label": "Bottom → top",           "value": "bottomToTop" },
+                    { "label": "Static (whole screen at once)", "value": "static" }
+                ]
+            },
+            "weatherChangeSpeed": {
+                "order": 43,
+                "text":   "Transition speed (mode escalation + front advance)",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.1,
+                "max":    5.0,
+                "step":   0.05
+            },
+            "showClouds": {
+                "order": 44,
+                "text":   "Cloud shadows on ground (default off)",
+                "type":   "bool",
+                "value":  false
+            },
+            "rainIntensity": {
+                "order": 45,
+                "text":   "Rain intensity (when raining)",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.0,
+                "max":    2.0,
+                "step":   0.05
+            },
+            "rainScatter": {
+                "order": 46,
+                "text":   "Rain scatter / patchiness",
+                "type":   "slider",
+                "value":  0.65,
+                "min":    0.0,
+                "max":    1.0,
+                "step":   0.05
+            },
+            "rainExtinguishes": {
+                "order": 47,
+                "text":   "Rain extinguishes fires",
+                "type":   "bool",
+                "value":  true
+            },
+
+            "hdrAuto": {
+                "order": 50,
+                "text":   "──────── Auto-ignition & regrowth ────────",
+                "type":   "text"
+            },
+            "autoIgnite": {
+                "order": 51,
+                "text":   "Auto-ignite (random sparks / storm lightning)",
+                "type":   "bool",
+                "value":  true
+            },
+            "autoIgniteRate": {
+                "order": 52,
+                "text":   "Auto-ignite frequency",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.1,
+                "max":    4.0,
+                "step":   0.05
+            },
+            "regrowth": {
+                "order": 53,
+                "text":   "Forest regrows from ash",
+                "type":   "bool",
+                "value":  true
+            },
+            "regrowthRate": {
+                "order": 54,
+                "text":   "Regrowth speed",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.1,
+                "max":    4.0,
+                "step":   0.05
+            },
+
+            "hdrAtmos": {
+                "order": 60,
+                "text":   "──────── Atmosphere ────────",
+                "type":   "text"
+            },
+            "showBirds": {
+                "order": 61,
+                "text":   "Bird flocks crossing screen",
+                "type":   "bool",
+                "value":  true
+            },
+            "showFireflies": {
+                "order": 62,
+                "text":   "Fireflies (subtle glow)",
+                "type":   "bool",
+                "value":  true
+            },
+            "showFish": {
+                "order": 63,
+                "text":   "Fish shadows in water",
+                "type":   "bool",
+                "value":  true
+            },
+            "screenEffects": {
+                "order": 64,
+                "text":   "Full-screen effects (weather tint, lightning flash, RGB glow) — off = calmer background",
+                "type":   "bool",
+                "value":  true
+            },
+            "windGusts": {
+                "order": 65,
+                "text":   "Wind gusts (occasional bursts)",
+                "type":   "bool",
+                "value":  true
+            },
+            "seedFireOnStart": {
+                "order": 66,
+                "text":   "Start with a small fire (so the wallpaper opens with action)",
+                "type":   "bool",
+                "value":  true
+            },
+
+            "hdrAudio": {
+                "order": 67,
+                "text":   "──────── Audio reactivity ────────",
+                "type":   "text"
+            },
+            "audioReactive": {
+                "order": 68,
+                "text":   "React to system audio (fire pulses with music)",
+                "type":   "bool",
+                "value":  true
+            },
+            "audioIntensity": {
+                "order": 69,
+                "text":   "Audio reactivity strength",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.0,
+                "max":    2.5,
+                "step":   0.05
+            },
+
+            "hdrRgb": {
+                "order": 70,
+                "text":   "──────── RGB lighting (iCUE / Aura / Razer) ────────",
+                "type":   "text"
+            },
+            "rgbEdgeMode": {
+                "order": 71,
+                "text":   "RGB edge mode (fire/lightning bleeds to borders)",
+                "type":   "bool",
+                "value":  true
+            },
+            "rgbEdgeStrength": {
+                "order": 72,
+                "text":   "RGB edge strength",
+                "type":   "slider",
+                "value":  0.7,
+                "min":    0.0,
+                "max":    2.0,
+                "step":   0.05
+            },
+
+            "hdrCamera": {
+                "order": 73,
+                "text":   "──────── Camera / map ────────",
+                "type":   "text"
+            },
+            "worldSize": {
+                "order": 74,
+                "text":   "Map size (how much bigger than the screen — gives room to pan)",
+                "type":   "slider",
+                "value":  1.5,
+                "min":    1.0,
+                "max":    3.0,
+                "step":   0.1
+            },
+            "mousePan": {
+                "order": 75,
+                "text":   "Pan toward mouse (view slews where the cursor is)",
+                "type":   "bool",
+                "value":  false
+            },
+            "panSpeed": {
+                "order": 76,
+                "text":   "Mouse-pan speed",
+                "type":   "slider",
+                "value":  1.0,
+                "min":    0.1,
+                "max":    3.0,
+                "step":   0.05
+            },
+            "panX": {
+                "order": 77,
+                "text":   "Manual pan — horizontal (when mouse-pan is off)",
+                "type":   "slider",
+                "value":  0.5,
+                "min":    0.0,
+                "max":    1.0,
+                "step":   0.01
+            },
+            "panY": {
+                "order": 78,
+                "text":   "Manual pan — vertical (when mouse-pan is off)",
+                "type":   "slider",
+                "value":  0.5,
+                "min":    0.0,
+                "max":    1.0,
+                "step":   0.01
+            },
+
+            "hdrInteract": {
+                "order": 80,
+                "text":   "──────── Interaction ────────",
+                "type":   "text"
+            },
+            "mouseInteraction": {
+                "order": 81,
+                "text":   "Mouse interaction (click to ignite)",
+                "type":   "bool",
+                "value":  true
+            },
+            "igniteRadius": {
+                "order": 82,
+                "text":   "Click ignition radius",
+                "type":   "slider",
+                "value":  2,
+                "min":    1,
+                "max":    8,
+                "step":   1
+            },
+            "showMouseHint": {
+                "order": 83,
+                "text":   "Show ignition radius hint at mouse cursor",
+                "type":   "bool",
+                "value":  true
+            },
+            "resetButton": {
+                "order": 84,
+                "text":   "Reset world now",
+                "type":   "bool",
+                "value":  false
+            },
+
+            "hdrDebug": {
+                "order": 90,
+                "text":   "──────── Debug ────────",
+                "type":   "text"
+            },
+            "debugOverlay": {
+                "order": 91,
+                "text":   "Show debug overlay",
+                "type":   "bool",
+                "value":  false
+            }
+        }
+    }
+}

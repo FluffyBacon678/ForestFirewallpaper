@@ -1,0 +1,3645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Forest Wildfire</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0f08; }
+    canvas { display: block; position: absolute; inset: 0; }
+    #debug {
+      position: fixed; top: 8px; left: 8px;
+      color: rgba(255,255,255,0.75);
+      font: 12px/1.3 ui-monospace, monospace;
+      background: rgba(0,0,0,0.45);
+      padding: 6px 8px;
+      border-radius: 4px;
+      display: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="bg"></canvas>
+<canvas id="c"></canvas>
+<div id="debug"></div>
+<script>
+"use strict";
+
+// ============================================================
+// User-tunable properties (overridden live by Wallpaper Engine)
+// ============================================================
+const props = {
+    treeDensity:       0.46,   // dense, jungle-lush forest
+    grassDensity:      1.00,   // ground heavily covered in green growth
+    rockDensity:       0.04,
+    cellSize:          10,     // zoom: smaller = more zoomed out / lusher
+    treeScale:         0.80,   // tree size (smaller = plantier)
+    // Camera / map panning (world is generated larger than the screen)
+    worldSize:         1.5,    // world dimensions vs screen (1 = no pan room)
+    panX:              0.5,    // manual camera position 0..1 (when mouse-pan off)
+    panY:              0.5,
+    mousePan:          false,  // view slews toward the mouse (off centre = pan that way)
+    panSpeed:          1.0,
+    spreadRate:        1.0,
+    treeBurnDuration:  1.5,
+    grassBurnDuration: 0.7,
+    fireGlow:          1.0,
+    magicFire:         0.0,    // 0 = normal fire; >0 = fraction of cells with magic-coloured flames
+    heatShimmer:       false,  // rising heat-haze distortion above big fires (off — subtle even when on)
+    windStrength:      1.0,
+    windRotation:      0.8,
+    showWindParticles: true,
+    showSmoke:         true,
+    showEmbers:        true,
+    showFlamePlumes:   true,
+    autoIgnite:        true,
+    autoIgniteRate:    1.0,
+    regrowth:          true,
+    regrowthRate:      1.0,
+    mouseInteraction:  true,
+    igniteRadius:      2,
+    debugOverlay:      false,
+    // Weather
+    weatherMode:       "auto", // auto / clear / cloudy / rain / storm
+    weatherDirection:  "leftToRight", // leftToRight / rightToLeft / topToBottom / bottomToTop / static
+    weatherChangeSpeed: 1.0,
+    showClouds:        false, // off by default — user can enable
+    rainIntensity:     1.0,
+    rainScatter:       0.65,
+    rainExtinguishes:  true,
+    // Atmosphere
+    showBirds:         true,
+    showFireflies:     true,
+    showFish:          true,
+    showLeaves:        true,
+    screenEffects:     true,   // full-screen weather tint + RGB vignette (off = calmer background)
+    showRivers:        true,
+    showLilyPads:      true,
+    showPaths:         true,
+    showRocks:         true,
+    showElevation:     true,
+    // RGB
+    rgbEdgeMode:       true,
+    rgbEdgeStrength:   0.7,
+    // Performance
+    quality:           "high",
+    fpsCap:            "60",
+    // Audio reactivity (Wallpaper Engine system audio)
+    audioReactive:     true,
+    audioIntensity:    1.0,
+    // Interactions / polish
+    showMouseHint:     true,
+    windGusts:         true,
+    seedFireOnStart:   true,
+};
+
+// ============================================================
+// State enum
+// ============================================================
+const DIRT       = 0;
+const GRASS      = 1;
+const TREE       = 2;
+const BURN_GRASS = 3;
+const BURN_TREE  = 4;
+const ASH_GRASS  = 5;
+const ASH_TREE   = 6;
+const WATER      = 7;  // non-burnable, blocks spread
+const ROCK       = 8;  // non-burnable, blocks spread (small gray sprite)
+const CHARRED    = 9;  // cold blackened scorched earth (a burn scar that lingers)
+
+// waterPhase bit layout (per cell):
+//   0x0F (bits 0-3): ripple phase (16 values)
+//   0x10 (bit 4):   water — shoreline reflection flag
+//   0x20 (bit 5):   water — lily-pad flower flag
+//   0x40 (bit 6):   water — lily pad present
+//   0x80 (bit 7):   dirt  — path tint flag
+
+const BURN_BASE         = 110;  // longer-lived flames → the fire "process" lingers
+// Spread is gated by fire intensity (a cell must build up before it can spread).
+// Lowered for the lusher forest: with more fuel per cell the same rate would race,
+// so these are tuned so the front creeps gently and fires don't engulf the screen.
+const BASE_SPREAD_GRASS = 0.0090;
+const BASE_SPREAD_TREE  = 0.0046;
+
+// Fire lifecycle intensity curve from normalized age (0 = just lit, 1 = spent).
+// Smolder → grow → blaze (plateau) → die back to embers. Returns 0..1.
+// A long, dim smolder phase means new fires start as a tiny faint ember and
+// build slowly into the full blaze before dying back down.
+function burnIntensity(age) {
+    if (age < 0.40) {
+        // Smolder → grow: cubic ease-in keeps it small/faint for a while,
+        // then accelerates up to the full flame.
+        const t = age / 0.40;
+        return 0.03 + 0.97 * (t * t * t);    // 0.03 → 1.0 (cubic ease-in)
+    } else if (age < 0.70) {
+        return 1.0;                          // peak blaze plateau
+    } else {
+        // Dying: ease-out back down to a low ember glow
+        const t = (age - 0.70) / 0.30;
+        return 1.0 - 0.85 * (t * t);         // 1.0 → 0.15
+    }
+}
+const UPDATE_EVERY      = 2;
+const MAX_SMOKE         = 1500;
+const MAX_EMBERS        = 700;
+const MAX_WIND_PARTS    = 90;
+const MAX_LEAVES        = 140;
+const MAX_LIGHTNING     = 4;
+const MAX_PLUMES        = 700;
+const MAX_SPARKS        = 400;
+// Base colours for magic-coloured flames (blended toward white at the tip)
+const MAGIC_FIRE = [
+    [40, 220, 235],   // cyan
+    [80, 235, 95],    // green
+    [185, 95, 245],   // purple
+    [70, 120, 255],   // blue
+    [255, 90, 200],   // pink
+];
+const MAX_RAIN          = 1200;
+const MAX_CLOUDS        = 8;
+const MAX_HEAT_DRAFTS   = 200;
+const ROCK_NUM_VARIANTS = 4;
+
+// Tree species (encoded in variant: variant = (species << 1) | sizeBit)
+const SPECIES_PINE   = 0;
+const SPECIES_BIRCH  = 1;
+const SPECIES_MAPLE  = 2;   // NEW — buffer between birch & autumn
+const SPECIES_AUTUMN = 3;
+const SPECIES_DEAD   = 4;
+
+// Weather modes — ordered as a spectrum from driest to wettest so the
+// auto-cycle can drift one step at a time (sunny → clear → cloudy → … → storm).
+const WEATHER_DROUGHT = 0;  // sunny / hot / dry — fire spreads faster
+const WEATHER_CLEAR   = 1;
+const WEATHER_CLOUDY  = 2;
+const WEATHER_RAIN    = 3;
+const WEATHER_MONSOON = 4;  // very heavy rain
+const WEATHER_STORM   = 5;  // heavy rain + frequent lightning
+const WEATHER_COUNT   = 6;
+const WEATHER_NAMES   = ["drought", "clear", "cloudy", "rain", "monsoon", "storm"];
+
+// Per-mode moisture (drives rain + cloud density), fire multiplier, lightning rate.
+const WEATHER_MOISTURE  = [0.00, 0.00, 0.35, 0.65, 0.88, 1.00];
+const WEATHER_FIRE_MUL  = [1.65, 1.00, 0.90, 0.72, 0.58, 0.62]; // drought fans fire; wet damps it
+const WEATHER_LIGHTNING = [0.30, 0.50, 0.70, 1.20, 2.00, 6.00]; // ×base auto-ignite (storm peaks)
+
+// ============================================================
+// Value noise (for procedural biome terrain)
+// ============================================================
+function hash2(x, y, seed) {
+    let h = ((x * 374761393) ^ (y * 668265263) ^ (seed * 982451653)) | 0;
+    h = (h ^ (h >>> 13)) * 1274126177 | 0;
+    h = h ^ (h >>> 16);
+    return ((h >>> 0) & 0xFFFFFF) / 0xFFFFFF;
+}
+function valueNoise(x, y, seed) {
+    const ix = Math.floor(x), iy = Math.floor(y);
+    const fx = x - ix, fy = y - iy;
+    const sx = fx * fx * (3 - 2 * fx);
+    const sy = fy * fy * (3 - 2 * fy);
+    const c00 = hash2(ix,     iy,     seed);
+    const c10 = hash2(ix + 1, iy,     seed);
+    const c01 = hash2(ix,     iy + 1, seed);
+    const c11 = hash2(ix + 1, iy + 1, seed);
+    const top = c00 + (c10 - c00) * sx;
+    const bot = c01 + (c11 - c01) * sx;
+    return top + (bot - top) * sy;
+}
+function fbm(x, y, seed, octaves) {
+    let v = 0, amp = 1, freq = 1, max = 0;
+    for (let i = 0; i < octaves; i++) {
+        v += amp * valueNoise(x * freq, y * freq, seed + i * 71);
+        max += amp;
+        amp *= 0.55;
+        freq *= 2;
+    }
+    return v / max;
+}
+
+const NEIGHBOURS = [
+    [-1,-1],[ 0,-1],[ 1,-1],
+    [-1, 0],        [ 1, 0],
+    [-1, 1],[ 0, 1],[ 1, 1],
+];
+
+const TREE_NUM_VARIANTS  = 10;  // 5 species × 2 sizes
+// Ground-cover variety, baked one slice per variant:
+//   0-9   lush grass (shade/density variations)
+//   10-12 tall grass
+//   13-15 dry / golden grass
+//   16-21 wildflowers (white, yellow, red, pink, purple, blue)
+//   22 clover  23 fern  24 shrub  25 dandelion  26 mushrooms  27 berry bush
+//   28 flower patch  29 lavender  30 tulips  31 pampas grass  32 reeds  33 glowing mushrooms
+const GRASS_NUM_VARIANTS = 37;   // + jungle broadleaf / fern / elephant-ear
+const GRASS_GLOWMUSH = 33;   // variant index whose cells emit a soft pulsing glow
+const TREE_TINTS = [
+    { r: 32, g: 78,  b: 24 },  // darker green
+    { r: 50, g: 105, b: 32 },  // brighter green
+];
+
+// ============================================================
+// Globals
+// ============================================================
+const bgCanvas = document.getElementById("bg");
+const bgCtx    = bgCanvas.getContext("2d");
+const canvas   = document.getElementById("c");
+const ctx      = canvas.getContext("2d");
+const debugEl  = document.getElementById("debug");
+
+let cols = 0, rows = 0;
+let grid, burnTimer, treeVar, grassVar, waterPhase;
+// Fire lifecycle: burnMax = each cell's total burn duration (to compute age);
+// fireHeat = 0..1 local heat from burning neighbours (the "blaze" clustering effect)
+let burnMax, fireHeat;
+// Tree growth stage 0..1 (sapling → mature). Regrown trees start small and grow.
+let treeGrowth;
+let smokeParticles = [];
+let embers = [];
+let windStreaks = [];
+let leaves = [];
+let lightningBolts = [];
+let flamePlumes = [];
+let sparks = [];      // bright crackling sparks that pop off the fire
+let birds = [];
+let fireflies = [];
+let glowSpots = [];      // cell centres of glowing-mushroom cells (soft pulsing glow)
+let fishList  = [];      // fish shadows swimming in water bodies
+let glowRefreshAt = 0;   // frame countdown to next glowSpots rescan
+let rainDrops = [];
+let clouds = [];
+let rockVar; // Uint8Array per cell, only meaningful when grid[i] === ROCK
+let weatherCurrent = WEATHER_CLEAR;
+let weatherTarget  = WEATHER_CLEAR;
+let weatherBlend   = 1.0;  // 1 = fully at current, animates to 1 as we transition
+let weatherTimer   = 600;  // frames until next auto-transition
+// Smoothly interpolated intensity (0..1) — so light rain escalates to storm gradually
+let weatherIntensitySmooth = 0;
+// Front progress (0..1) — how much of the screen the weather has covered, advances in chosen direction
+let weatherFrontProgress = 0;
+let rgbVignettePulse = 0;  // 0-1 momentary pulse on lightning/big ignition
+
+// Sprite atlas for rocks
+let rockSprites = null;
+let rockSpW = 0, rockSpH = 0;
+let windAngle = Math.random() * Math.PI * 2;
+let frame = 0;
+let burningCount = 0;
+let terrainSeed = 12345;
+// Camera: the world is bigger than the viewport; (camX,camY) is the world-pixel
+// position of the screen's top-left corner.
+let camX = 0, camY = 0;
+let worldPxW = 0, worldPxH = 0;   // world size in pixels (cols*cell, rows*cell)
+
+let glowCanvas, glowCtx;
+let hazeCanvas = null, hazeCtx = null;   // scratch buffer for heat-shimmer distortion
+let treeSprites = null;
+let grassSprites = null;
+// Cached tree layer — thousands of detailed trees are expensive to redraw every
+// frame, so they're rendered into this offscreen canvas and rebuilt only every
+// few frames (the per-tree sway is slow enough that this looks smooth).
+let treeLayerCanvas = null, treeLayerCtx = null, treeLayerCountdown = 0;
+const TREE_LAYER_GAP = 3;
+let treeSpW = 0, treeSpH = 0;
+let grassSpW = 0, grassSpH = 0;
+// Per-cell positional jitter (broken-grid look)
+let jitterX, jitterY;
+
+// Static-layer cache (water/grass/paths/rocks/ash baked, only re-rendered when grid changes)
+let staticCanvas = null;
+let staticCtx    = null;
+let staticDirty  = true;
+// Offscreen mask for smooth (blurred) water shorelines
+let waterMask    = null;
+let waterMaskCtx = null;
+// Terrain layer (dirt + water + paths + lily pads + rocks) — baked once per worldgen,
+// since none of it changes when cells burn/regrow. Keeps the expensive water blur
+// out of the per-grid-change static rebuild.
+let terrainCanvas = null;
+let terrainCtx    = null;
+let terrainDirty  = true;
+let staticThrottle = 0;
+const STATIC_REBUILD_MIN_GAP = 3; // re-bake at most every N frames even if dirty
+
+// FPS + fixed-timestep simulation
+let lastFrameMs   = 0;
+let avgFps        = 60;
+let lastSimMs     = 0;
+const SIM_TICK_MS = 1000 / 30;   // 30 sim ticks/sec regardless of frame rate
+const MAX_SIM_PER_FRAME = 5;     // cap catch-up loops to avoid death spiral
+
+// FPS cap — 0 = unlimited, otherwise minimum ms between rendered frames
+let minFrameMs    = 0;
+let lastRenderMs  = 0;
+
+// Quality multiplier for particle caps (Low/Medium/High/Ultra)
+let qMul = 1.0;
+
+// Audio reactivity — set by Wallpaper Engine's audio listener (0..1 average)
+let audioLevel = 0;
+let audioBass  = 0;
+
+// Wind gust state — temporary burst above base windStrength
+let gustStrength = 0;       // 0..1.5 boost added to windStrength
+let gustTimer    = 0;       // frames remaining in current gust
+let nextGustAt   = 600;     // frames until next possible gust
+
+// Mouse hover indicator
+let mouseX = -100, mouseY = -100;
+let mouseInside = false;
+
+// Lightning afterglow — vertical fading column at strike points
+let lightningGlows = [];
+
+function applyQuality(q) {
+    switch (q) {
+        case "low":    qMul = 0.40; break;
+        case "medium": qMul = 0.70; break;
+        case "high":   qMul = 1.00; break;
+        case "ultra":  qMul = 1.60; break;
+        default:       qMul = 1.00;
+    }
+}
+
+function applyFpsCap(v) {
+    if (v === "unlimited" || v === "0" || v === 0) {
+        minFrameMs = 0;
+    } else {
+        const n = parseFloat(v);
+        minFrameMs = (n > 0 && isFinite(n)) ? (1000 / n) : 0;
+    }
+}
+
+// ============================================================
+// Dirt background (procedural, baked once per resize)
+// ============================================================
+function drawDirtBackground() {
+    const w = bgCanvas.width;
+    const h = bgCanvas.height;
+    const c = bgCtx;
+
+    // Base ground colour — lush mossy jungle floor (green-dominant, not bare brown)
+    c.fillStyle = "#2f3d1e";
+    c.fillRect(0, 0, w, h);
+
+    // --- Smooth ground variation (warm/cool brown patches + elevation) ---
+    // Rendered at low resolution from coherent noise, then upscaled with bilinear
+    // smoothing. This avoids both the perfect-circle blobs and the per-cell grid
+    // boxes the old approach produced — it's continuous, organic shading.
+    const LOW = 14;                       // px per low-res sample
+    const nw = Math.ceil(w / LOW) + 1;
+    const nh = Math.ceil(h / LOW) + 1;
+    const noiseCanvas = document.createElement("canvas");
+    noiseCanvas.width = nw; noiseCanvas.height = nh;
+    const nc = noiseCanvas.getContext("2d");
+    const img = nc.createImageData(nw, nh);
+    const data = img.data;
+    const elevOn = props.showElevation ? 1 : 0;
+    const seedE = terrainSeed + 9000;
+    const seedP = terrainSeed + 3000;
+    for (let yy = 0; yy < nh; yy++) {
+        for (let xx = 0; xx < nw; xx++) {
+            const px = xx * LOW, py = yy * LOW;
+            // elevation: large rolling features; patch: medium warm/cool variation
+            const e = fbm(px * 0.0023, py * 0.0023, seedE, 3) - 0.5; // -0.5..0.5
+            const p = fbm(px * 0.0060, py * 0.0060, seedP, 3) - 0.5; // -0.5..0.5
+            const elev = e * elevOn;
+            // Mossy green floor: green channel leads, with patches drifting between
+            // mossy green (p high) and earthy green-brown (p low).
+            let R = 44 + elev * 30 + p * 40;
+            let G = 60 + elev * 40 + p * 26;
+            let B = 28 + elev * 20 + p * 14;
+            R = R < 0 ? 0 : R > 255 ? 255 : R;
+            G = G < 0 ? 0 : G > 255 ? 255 : G;
+            B = B < 0 ? 0 : B > 255 ? 255 : B;
+            const o = (yy * nw + xx) * 4;
+            data[o] = R; data[o + 1] = G; data[o + 2] = B; data[o + 3] = 255;
+        }
+    }
+    nc.putImageData(img, 0, 0);
+    c.imageSmoothingEnabled = true;
+    c.drawImage(noiseCanvas, 0, 0, nw, nh, 0, 0, w, h);
+
+    // Mossy green flecks (pixel-level grain — gives the lush jungle-floor texture)
+    const lightSpecks = (w * h) / 45;
+    for (let i = 0; i < lightSpecks; i++) {
+        const x = (Math.random() * w) | 0;
+        const y = (Math.random() * h) | 0;
+        const a = (0.10 + Math.random() * 0.20).toFixed(2);
+        const moss = Math.random() < 0.7;
+        const r = moss ? (55 + Math.random() * 30 | 0) : (95 + Math.random() * 30 | 0);
+        const g = moss ? (85 + Math.random() * 40 | 0) : (75 + Math.random() * 25 | 0);
+        const b = moss ? (40 + Math.random() * 22 | 0) : (45 + Math.random() * 20 | 0);
+        c.fillStyle = `rgba(${r},${g},${b},${a})`;
+        c.fillRect(x, y, 1, 1);
+    }
+
+    // Darker specks
+    const darkSpecks = (w * h) / 140;
+    for (let i = 0; i < darkSpecks; i++) {
+        const x = (Math.random() * w) | 0;
+        const y = (Math.random() * h) | 0;
+        const a = (0.18 + Math.random() * 0.28).toFixed(2);
+        c.fillStyle = `rgba(14,8,4,${a})`;
+        c.fillRect(x, y, 1 + (Math.random() < 0.3 ? 1 : 0), 1);
+    }
+
+    // Sparse pebbles (small, intentional — not the big circular blobs)
+    const pebbles = (w * h) / 1500;
+    for (let i = 0; i < pebbles; i++) {
+        const x = Math.random() * w;
+        const y = Math.random() * h;
+        const r = 1 + Math.random() * 1.6;
+        const pr = 115 + Math.random() * 35 | 0;
+        const pg = 100 + Math.random() * 28 | 0;
+        const pb = 80 + Math.random() * 28 | 0;
+        c.fillStyle = `rgba(${pr},${pg},${pb},0.6)`;
+        c.beginPath();
+        c.arc(x, y, r, 0, Math.PI * 2);
+        c.fill();
+        c.fillStyle = "rgba(0,0,0,0.26)";
+        c.beginPath();
+        c.arc(x + 0.6, y + 0.7, r * 0.85, 0, Math.PI * 2);
+        c.fill();
+    }
+
+    // Dirt background changed → terrain (and therefore static) needs a rebuild
+    markTerrainDirty();
+}
+
+// ============================================================
+// Sprite atlases — trees (top-down round canopies) + grass tufts
+// ============================================================
+function buildSpriteAtlases() {
+    const cell = Math.max(4, props.cellSize | 0);
+    // Detailed SIDE-VIEW trees that stand up from their cell. Kept fairly compact
+    // and "planty" so a dense forest reads as a lush canopy rather than giant
+    // towers; the treeScale property fine-tunes their size. Anchored at the base.
+    treeSpW = Math.ceil(cell * 2.1);
+    treeSpH = Math.ceil(cell * 3.0);
+    // Grass stays in-cell so it's cheap and clean over dirt.
+    grassSpW = cell;
+    grassSpH = cell;
+
+    if (!treeSprites) treeSprites = document.createElement("canvas");
+    treeSprites.width  = treeSpW * TREE_NUM_VARIANTS;
+    treeSprites.height = treeSpH;
+    const tc = treeSprites.getContext("2d");
+    tc.clearRect(0, 0, treeSprites.width, treeSprites.height);
+    for (let v = 0; v < TREE_NUM_VARIANTS; v++) {
+        renderTreeTopDown(tc, v * treeSpW, 0, treeSpW, treeSpH, v);
+    }
+
+    if (!grassSprites) grassSprites = document.createElement("canvas");
+    grassSprites.width  = grassSpW * GRASS_NUM_VARIANTS;
+    grassSprites.height = grassSpH;
+    const gc = grassSprites.getContext("2d");
+    gc.clearRect(0, 0, grassSprites.width, grassSprites.height);
+    for (let v = 0; v < GRASS_NUM_VARIANTS; v++) {
+        renderGrassTopDown(gc, v * grassSpW, 0, grassSpW, grassSpH, v);
+    }
+}
+
+// ============================================================
+// Detailed SIDE-VIEW trees (trunk + dappled textured canopy).
+// Sprite origin is top-left of the slice; the tree BASE sits at the sprite
+// bottom (baseY) and the canopy rises toward the top.
+// ============================================================
+function renderTreeTopDown(c, ox, oy, w, h, variant) {
+    const species = (variant >> 1) & 7;
+    const sizeIdx = variant & 1;
+    const cx = ox + w / 2;
+    const baseY = oy + h - 1;
+    switch (species) {
+        case SPECIES_PINE:   drawConiferSide(c, cx, baseY, w, h, sizeIdx); break;
+        case SPECIES_BIRCH:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "birch"); break;
+        case SPECIES_MAPLE:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "maple"); break;
+        case SPECIES_AUTUMN: drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "autumn"); break;
+        case SPECIES_DEAD:   drawDeadSide(c, cx, baseY, w, h, sizeIdx); break;
+    }
+}
+
+// Soft ground contact shadow (an ellipse where the trunk meets the ground)
+function drawGroundShadow(c, cx, baseY, rx) {
+    c.fillStyle = "rgba(0,0,0,0.22)";
+    c.beginPath();
+    c.ellipse(cx + rx * 0.12, baseY, rx, Math.max(1, rx * 0.32), 0, 0, Math.PI * 2);
+    c.fill();
+}
+
+// A vertical trunk with light/shaded edges; birch = pale bark with dark marks.
+function drawTrunkSide(c, cx, baseY, tw, th, birch) {
+    const x0 = Math.round(cx - tw / 2);
+    const wq = Math.max(1, Math.round(tw));
+    if (birch) {
+        c.fillStyle = "#d9d3c4";
+        c.fillRect(x0, baseY - th, wq, th);
+        c.fillStyle = "rgba(150,148,135,0.55)";              // shaded right edge
+        c.fillRect(x0 + wq - 1, baseY - th, 1, th);
+        c.fillStyle = "rgba(40,35,28,0.85)";                 // dark birch flecks
+        const marks = Math.max(2, (th * 0.22) | 0);
+        for (let m = 0; m < marks; m++) {
+            c.fillRect(x0 + ((Math.random() * wq) | 0),
+                       (baseY - th + Math.random() * th) | 0,
+                       1 + (Math.random() < 0.4 ? 1 : 0), 1);
+        }
+    } else {
+        c.fillStyle = "#5b3d23";
+        c.fillRect(x0, baseY - th, wq, th);
+        c.fillStyle = "rgba(112,80,46,0.6)";                 // lit left edge
+        c.fillRect(x0, baseY - th, 1, th);
+        c.fillStyle = "rgba(34,22,12,0.6)";                  // shaded right edge
+        c.fillRect(x0 + wq - 1, baseY - th, 1, th);
+        // bark texture flecks
+        c.fillStyle = "rgba(30,18,10,0.45)";
+        for (let m = 0; m < Math.max(2, (th * 0.18) | 0); m++)
+            c.fillRect(x0 + ((Math.random() * wq) | 0), (baseY - th + Math.random() * th) | 0, 1, 1);
+    }
+}
+
+// Scatter leaf-cluster dabs inside an ellipse (cx,cy / rx,ry) for a dappled canopy.
+function leafCluster(c, cx, cy, rx, ry, col, n, fill) {
+    c.fillStyle = col;
+    const br = Math.max(1.1, rx * 0.17);
+    for (let i = 0; i < n; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const rr = Math.sqrt(Math.random()) * fill;
+        c.beginPath();
+        c.arc(cx + Math.cos(a) * rx * rr, cy + Math.sin(a) * ry * rr, br, 0, Math.PI * 2);
+        c.fill();
+    }
+}
+
+// Broadleaf tree (oak-like): trunk + big dappled rounded canopy.
+function drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, kind) {
+    const trunkH = h * (0.30 + sizeIdx * 0.02);
+    const trunkW = Math.max(2, w * 0.14);
+    const birch = kind === "birch";
+
+    // palette: [outline/dark, mid, lit, highlight]
+    let pal;
+    if (birch)            pal = ["#274d1c", "#3c7a2a", "#5fa843", "#84c662"];
+    else if (kind === "maple")  pal = ["#5f5018", "#9c8327", "#caa53c", "#e6cb63"];
+    else if (kind === "autumn") pal = ["#742612", "#a8451c", "#cc6a2a", "#e8a24e"];
+    else                  pal = ["#1f4a1b", "#2f6e27", "#4e9a3a", "#74c057"]; // oak green
+    const [dark, mid, lite, hi] = pal;
+
+    drawGroundShadow(c, cx, baseY, w * 0.32);
+    drawTrunkSide(c, cx, baseY, trunkW, trunkH, birch);
+
+    const canRx = w * (0.44 + sizeIdx * 0.03);
+    const canRy = h * (0.31 + sizeIdx * 0.03);
+    const canCy = baseY - trunkH * 0.55 - canRy * 0.92;
+
+    leafCluster(c, cx, canCy, canRx, canRy, dark, 30, 1.0);                       // silhouette
+    leafCluster(c, cx, canCy, canRx * 0.9, canRy * 0.9, mid, 34, 0.94);          // mid fill
+    leafCluster(c, cx - canRx * 0.22, canCy - canRy * 0.24, canRx * 0.62, canRy * 0.62, lite, 24, 0.9); // lit side
+    leafCluster(c, cx - canRx * 0.30, canCy - canRy * 0.30, canRx * 0.4, canRy * 0.4, hi, 11, 0.85);     // highlights
+    leafCluster(c, cx + canRx * 0.24, canCy + canRy * 0.22, canRx * 0.3, canRy * 0.3, dark, 7, 0.7);     // shadow pocket
+}
+
+// Conifer (pine/fir): brown trunk + stacked triangular tiers.
+function drawConiferSide(c, cx, baseY, w, h, sizeIdx) {
+    const trunkH = h * 0.14;
+    const trunkW = Math.max(2, w * 0.12);
+    drawGroundShadow(c, cx, baseY, w * 0.28);
+    drawTrunkSide(c, cx, baseY, trunkW, trunkH, false);
+
+    const dark = "#163d18", mid = "#235c24", lite = "#3f8138";
+    const topY = baseY - h * 0.97;
+    const botY = baseY - trunkH * 0.5;
+    const tiers = 4 + sizeIdx;
+    const tierH = (botY - topY) / tiers;
+
+    for (let t = 0; t < tiers; t++) {
+        const ty = topY + t * tierH;
+        const tw = w * (0.16 + (t / tiers) * 0.40);   // wider toward the bottom
+        // dark base triangle
+        c.fillStyle = dark;
+        c.beginPath();
+        c.moveTo(cx, ty - tierH * 0.35);
+        c.lineTo(cx + tw, ty + tierH * 1.05);
+        c.lineTo(cx - tw, ty + tierH * 1.05);
+        c.closePath(); c.fill();
+        // mid layer
+        c.fillStyle = mid;
+        c.beginPath();
+        c.moveTo(cx, ty - tierH * 0.2);
+        c.lineTo(cx + tw * 0.82, ty + tierH * 0.92);
+        c.lineTo(cx - tw * 0.82, ty + tierH * 0.92);
+        c.closePath(); c.fill();
+        // lit left facet
+        c.fillStyle = lite;
+        c.beginPath();
+        c.moveTo(cx - tw * 0.15, ty);
+        c.lineTo(cx - tw * 0.78, ty + tierH * 0.88);
+        c.lineTo(cx - tw * 0.30, ty + tierH * 0.88);
+        c.closePath(); c.fill();
+    }
+    // crown tip highlight
+    c.fillStyle = lite;
+    c.fillRect((cx - 0.5) | 0, topY | 0, 1, 2);
+}
+
+// Dead tree: bare branching skeleton (pale grey or reddish-brown).
+function drawDeadSide(c, cx, baseY, w, h, sizeIdx) {
+    const reddish = sizeIdx === 1;
+    const limb = reddish ? "#6e3b2a" : "#cfc9bb";
+    const tipCol = reddish ? "#84513a" : "#e7e2d6";
+    drawGroundShadow(c, cx, baseY, w * 0.22);
+
+    c.lineCap = "round";
+    const draw = (x, y, ang, len, wdt, depth) => {
+        if (depth <= 0 || len < 2) return;
+        const ex = x + Math.cos(ang) * len;
+        const ey = y + Math.sin(ang) * len;
+        c.lineWidth = Math.max(1, wdt);
+        c.strokeStyle = depth <= 1 ? tipCol : limb;
+        c.beginPath(); c.moveTo(x, y); c.lineTo(ex, ey); c.stroke();
+        draw(ex, ey, ang - 0.35 - Math.random() * 0.35, len * 0.72, wdt * 0.66, depth - 1);
+        draw(ex, ey, ang + 0.35 + Math.random() * 0.35, len * 0.72, wdt * 0.66, depth - 1);
+        if (Math.random() < 0.45)
+            draw(ex, ey, ang + (Math.random() - 0.5) * 0.4, len * 0.6, wdt * 0.6, depth - 1);
+    };
+    draw(cx, baseY, -Math.PI / 2, h * 0.42, Math.max(2, w * 0.15), 5 + sizeIdx);
+}
+
+// ============================================================
+// Rock sprites — small gray pebble/boulder shapes
+// ============================================================
+function buildRockSprites() {
+    const cell = Math.max(4, props.cellSize | 0);
+    rockSpW = cell;
+    rockSpH = cell;
+    if (!rockSprites) rockSprites = document.createElement("canvas");
+    rockSprites.width  = rockSpW * ROCK_NUM_VARIANTS;
+    rockSprites.height = rockSpH;
+    const c = rockSprites.getContext("2d");
+    c.clearRect(0, 0, rockSprites.width, rockSprites.height);
+    for (let v = 0; v < ROCK_NUM_VARIANTS; v++) {
+        renderRockSprite(c, v * rockSpW, 0, rockSpW, rockSpH, v);
+    }
+}
+
+function renderRockSprite(c, ox, oy, w, h, variant) {
+    const cx = ox + w / 2;
+    const cy = oy + h / 2;
+    const r = w * (0.30 + (variant & 1) * 0.08);
+
+    // Drop shadow
+    c.fillStyle = "rgba(0,0,0,0.45)";
+    c.beginPath();
+    c.arc(cx + 1, cy + 1.2, r * 1.05, 0, Math.PI * 2);
+    c.fill();
+
+    // Boulder body — base gray
+    const baseR = 105 + (variant * 7);
+    const baseG = 100 + (variant * 6);
+    const baseB = 95  + (variant * 5);
+    c.fillStyle = `rgb(${baseR},${baseG},${baseB})`;
+    c.beginPath();
+    c.arc(cx, cy, r, 0, Math.PI * 2);
+    c.fill();
+    // Bumps for irregular shape
+    const bumps = 3 + (variant % 2);
+    for (let i = 0; i < bumps; i++) {
+        const a = (Math.PI * 2 / bumps) * i + variant * 0.3;
+        const d = r * 0.35;
+        c.beginPath();
+        c.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r * 0.5, 0, Math.PI * 2);
+        c.fill();
+    }
+    // Lit highlight (upper-left)
+    c.fillStyle = `rgba(${baseR + 35},${baseG + 35},${baseB + 30},0.75)`;
+    c.beginPath();
+    c.arc(cx - r * 0.25, cy - r * 0.25, r * 0.50, 0, Math.PI * 2);
+    c.fill();
+    // Small darker crack/divot
+    c.fillStyle = `rgba(${(baseR * 0.55) | 0},${(baseG * 0.55) | 0},${(baseB * 0.55) | 0},0.6)`;
+    c.beginPath();
+    c.arc(cx + r * 0.15, cy + r * 0.20, r * 0.18, 0, Math.PI * 2);
+    c.fill();
+}
+
+// Weighted variant picker
+//   48% pine — dark green
+//   16% birch — light green w/ white trunk
+//   14% maple — warm gold (buffer between birch and autumn)
+//   13% autumn — red/orange
+//    9% dead — skeletal
+function pickTreeVariant() {
+    const r = Math.random();
+    let species;
+    if      (r < 0.48) species = SPECIES_PINE;
+    else if (r < 0.64) species = SPECIES_BIRCH;
+    else if (r < 0.78) species = SPECIES_MAPLE;
+    else if (r < 0.91) species = SPECIES_AUTUMN;
+    else               species = SPECIES_DEAD;
+    const sz = (Math.random() < 0.5) ? 0 : 1;
+    return (species << 1) | sz;
+}
+
+// A single grass blade: short vertical streak, dark base → light tip, slight lean.
+function drawBlade(c, x, y, hgt, lean, rBase, gBase, bBase, a) {
+    const steps = Math.max(2, hgt | 0);
+    for (let s = 0; s < steps; s++) {
+        const t = s / steps;                       // 0 base → ~1 tip
+        const px = x + lean * t;
+        const py = y - s;
+        const r = Math.min(255, (rBase + t * 45) | 0);
+        const g = Math.min(255, (gBase + t * 55) | 0);
+        const b = Math.min(255, (bBase + t * 25) | 0);
+        c.fillStyle = `rgba(${r},${g},${b},${(a).toFixed(2)})`;
+        c.fillRect(px | 0, py | 0, 1, 1);
+    }
+}
+
+// Dispatch a ground-cover sprite by variant index.
+function renderGrassTopDown(c, ox, oy, w, h, variant) {
+    if (variant < 10)      drawLushGrass(c, ox, oy, w, h, variant);
+    else if (variant < 13) drawTallGrass(c, ox, oy, w, h, variant - 10);
+    else if (variant < 16) drawDryGrass(c, ox, oy, w, h, variant - 13);
+    else if (variant < 22) drawWildflowers(c, ox, oy, w, h, variant - 16);
+    else if (variant === 22) drawClover(c, ox, oy, w, h);
+    else if (variant === 23) drawFern(c, ox, oy, w, h);
+    else if (variant === 24) drawShrub(c, ox, oy, w, h);
+    else if (variant === 25) drawDandelion(c, ox, oy, w, h);
+    else if (variant === 26) drawMushrooms(c, ox, oy, w, h);
+    else if (variant === 27) drawBerryBush(c, ox, oy, w, h);
+    else if (variant === 28) drawFlowerPatch(c, ox, oy, w, h);
+    else if (variant === 29) drawLavender(c, ox, oy, w, h);
+    else if (variant === 30) drawTulips(c, ox, oy, w, h);
+    else if (variant === 31) drawPampas(c, ox, oy, w, h);
+    else if (variant === 32) drawReeds(c, ox, oy, w, h);
+    else if (variant === 33) drawGlowMushrooms(c, ox, oy, w, h);
+    else if (variant === 34) drawBroadleaf(c, ox, oy, w, h);
+    else if (variant === 35) drawJungleFern(c, ox, oy, w, h);
+    else                     drawElephantEar(c, ox, oy, w, h);
+}
+
+// --- Lush grass (10 shade/density variations) — rich jungle greens ---
+function drawLushGrass(c, ox, oy, w, h, v) {
+    // shade: v alternates greener/yellower & darker/lighter; density scales with v
+    const yellow = (v % 3) * 0.07;          // only a touch of yellow-green
+    const dark   = ((v >> 1) % 2) * 14;     // some darker
+    const rB = 34 + yellow * 55 - dark;
+    const gB = 108 + yellow * 26 - dark;    // greener, more saturated
+    const bB = 32 + yellow * 8  - dark * 0.4;
+    const count = 9 + (v % 4) + ((w / 3) | 0);  // denser tufts
+    for (let i = 0; i < count; i++) {
+        const x = ox + 1 + Math.random() * (w - 2);
+        const y = oy + h - 1 - Math.random() * (h * 0.35);
+        const hgt = 2 + Math.random() * (h * 0.42);
+        const lean = (Math.random() - 0.5) * 2.2;
+        drawBlade(c, x, y, hgt, lean, rB, gB, bB, 0.78 + Math.random() * 0.22);
+    }
+}
+
+// --- Tall grass: fewer but long blades reaching up ---
+function drawTallGrass(c, ox, oy, w, h, v) {
+    drawLushGrass(c, ox, oy, w, h, 2);   // short underlayer
+    const count = 5 + (w / 4 | 0);
+    for (let i = 0; i < count; i++) {
+        const x = ox + 1 + Math.random() * (w - 2);
+        const y = oy + h - 1;
+        const hgt = h * (0.6 + Math.random() * 0.38);
+        const lean = (Math.random() - 0.5) * 3.2;
+        drawBlade(c, x, y, hgt, lean, 46, 96, 30, 0.85);
+    }
+}
+
+// --- Dry / golden grass: tan, sparse, bent ---
+function drawDryGrass(c, ox, oy, w, h, v) {
+    const count = 6 + (w / 4 | 0);
+    for (let i = 0; i < count; i++) {
+        const x = ox + 1 + Math.random() * (w - 2);
+        const y = oy + h - 1 - Math.random() * (h * 0.3);
+        const hgt = 2 + Math.random() * (h * 0.4);
+        const lean = (Math.random() - 0.5) * 3.0;     // more bent
+        const golden = 0.5 + Math.random() * 0.5;
+        drawBlade(c, x, y, hgt, lean,
+                  120 + golden * 50, 95 + golden * 40, 35 + golden * 20,
+                  0.7 + Math.random() * 0.25);
+    }
+}
+
+// --- Wildflowers: lush grass base + colored blossoms ---
+const FLOWER_COLORS = [
+    [240, 240, 235],  // white
+    [248, 214, 70],   // yellow
+    [220, 70,  70],   // red
+    [240, 130, 180],  // pink
+    [170, 110, 220],  // purple
+    [90,  150, 235],  // blue
+];
+function drawWildflowers(c, ox, oy, w, h, colorIdx) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const [fr, fg, fb] = FLOWER_COLORS[colorIdx % FLOWER_COLORS.length];
+    const blooms = 2 + (Math.random() * 3 | 0);
+    for (let i = 0; i < blooms; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const cy = oy + 2 + Math.random() * (h - 4);
+        const pr = Math.max(1, w * 0.12);
+        // petals (4 dots around)
+        c.fillStyle = `rgba(${fr},${fg},${fb},0.95)`;
+        c.beginPath(); c.arc(cx, cy, pr, 0, Math.PI * 2); c.fill();
+        // bright center
+        c.fillStyle = "rgba(255,240,120,0.95)";
+        c.fillRect((cx - 0.5) | 0, (cy - 0.5) | 0, 1, 1);
+    }
+}
+
+// --- Clover: little trefoil leaf clusters ---
+function drawClover(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 0);
+    const clusters = 2 + (Math.random() * 2 | 0);
+    for (let i = 0; i < clusters; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const cy = oy + 2 + Math.random() * (h - 4);
+        const lr = Math.max(1, w * 0.1);
+        c.fillStyle = "rgba(60,140,55,0.95)";
+        for (let a = 0; a < 3; a++) {
+            const ang = (Math.PI * 2 / 3) * a - Math.PI / 2;
+            c.beginPath();
+            c.arc(cx + Math.cos(ang) * lr, cy + Math.sin(ang) * lr, lr, 0, Math.PI * 2);
+            c.fill();
+        }
+    }
+}
+
+// --- Fern: central stem with side leaflets ---
+function drawFern(c, ox, oy, w, h) {
+    const fronds = 2 + (Math.random() * 2 | 0);
+    for (let f = 0; f < fronds; f++) {
+        const baseX = ox + 2 + Math.random() * (w - 4);
+        const baseY = oy + h - 1;
+        const topY  = oy + 1 + Math.random() * (h * 0.2);
+        const curve = (Math.random() - 0.5) * 3;
+        c.fillStyle = "rgba(40,105,38,0.92)";
+        const steps = (baseY - topY) | 0;
+        for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            const sx = baseX + curve * t * t;
+            const sy = baseY - s;
+            c.fillRect(sx | 0, sy | 0, 1, 1);
+            // side leaflets
+            if (s % 2 === 0) {
+                const ll = (1 - t) * w * 0.28;
+                c.fillRect((sx - ll) | 0, sy | 0, 1, 1);
+                c.fillRect((sx + ll) | 0, sy | 0, 1, 1);
+            }
+        }
+    }
+}
+
+// --- Shrub: small rounded bush clump ---
+function drawShrub(c, ox, oy, w, h) {
+    const cx = ox + w * 0.5, cy = oy + h * 0.55;
+    const r = w * 0.34;
+    c.fillStyle = "rgba(0,0,0,0.25)";
+    c.beginPath(); c.arc(cx + 0.6, cy + 0.8, r, 0, Math.PI * 2); c.fill();
+    c.fillStyle = "rgb(34,86,32)";
+    for (let i = 0; i < 5; i++) {
+        const a = (Math.PI * 2 / 5) * i + Math.random() * 0.4;
+        c.beginPath();
+        c.arc(cx + Math.cos(a) * r * 0.4, cy + Math.sin(a) * r * 0.4, r * 0.6, 0, Math.PI * 2);
+        c.fill();
+    }
+    c.fillStyle = "rgba(70,130,55,0.85)";
+    c.beginPath(); c.arc(cx - r * 0.2, cy - r * 0.2, r * 0.5, 0, Math.PI * 2); c.fill();
+}
+
+// --- Dandelion: grass + white/yellow puff balls ---
+function drawDandelion(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 4);
+    const puffs = 1 + (Math.random() * 2 | 0);
+    for (let i = 0; i < puffs; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const cy = oy + 2 + Math.random() * (h - 4);
+        const pr = Math.max(1, w * 0.16);
+        const white = Math.random() < 0.5;
+        c.fillStyle = white ? "rgba(238,242,235,0.9)" : "rgba(250,225,90,0.95)";
+        c.beginPath(); c.arc(cx, cy, pr, 0, Math.PI * 2); c.fill();
+        if (white) { // fluffy specks
+            c.fillStyle = "rgba(255,255,255,0.6)";
+            for (let s = 0; s < 4; s++)
+                c.fillRect((cx + (Math.random()-0.5)*pr*2.4)|0, (cy + (Math.random()-0.5)*pr*2.4)|0, 1, 1);
+        }
+    }
+}
+
+// --- Mushrooms: small cluster of caps ---
+function drawMushrooms(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 0);
+    const n = 2 + (Math.random() * 3 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const cy = oy + h * 0.4 + Math.random() * (h * 0.4);
+        const cr = Math.max(1, w * 0.13);
+        // stem
+        c.fillStyle = "rgba(225,215,195,0.95)";
+        c.fillRect(cx | 0, cy | 0, 1, Math.max(1, (cr) | 0));
+        // cap (red or tan)
+        const red = Math.random() < 0.55;
+        c.fillStyle = red ? "rgba(200,60,45,0.97)" : "rgba(165,120,80,0.97)";
+        c.beginPath(); c.arc(cx, cy, cr, Math.PI, 0); c.fill();
+        if (red) { // white spots
+            c.fillStyle = "rgba(255,255,255,0.9)";
+            c.fillRect((cx - cr*0.4)|0, (cy - cr*0.3)|0, 1, 1);
+        }
+    }
+}
+
+// --- Berry bush: green clump with berry dots ---
+function drawBerryBush(c, ox, oy, w, h) {
+    drawShrub(c, ox, oy, w, h);
+    const berries = 3 + (Math.random() * 4 | 0);
+    const red = Math.random() < 0.5;
+    for (let i = 0; i < berries; i++) {
+        const bx = ox + w * 0.3 + Math.random() * (w * 0.4);
+        const by = oy + h * 0.35 + Math.random() * (h * 0.4);
+        c.fillStyle = red ? "rgba(205,40,45,0.97)" : "rgba(80,40,140,0.97)";
+        c.beginPath(); c.arc(bx, by, Math.max(1, w * 0.08), 0, Math.PI * 2); c.fill();
+    }
+}
+
+// --- Flower patch: dense bed of mixed-colour blooms ---
+function drawFlowerPatch(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const cols2 = [0, 1, 3, 4]; // white, yellow, pink, purple (from FLOWER_COLORS)
+    const blooms = 7 + (Math.random() * 6 | 0);
+    for (let i = 0; i < blooms; i++) {
+        const cx = ox + 1.5 + Math.random() * (w - 3);
+        const cy = oy + 1.5 + Math.random() * (h - 3);
+        const [fr, fg, fb] = FLOWER_COLORS[cols2[(Math.random() * cols2.length) | 0]];
+        const pr = Math.max(1, w * 0.1);
+        c.fillStyle = `rgba(${fr},${fg},${fb},0.95)`;
+        c.beginPath(); c.arc(cx, cy, pr, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(255,240,120,0.9)";
+        c.fillRect(cx | 0, cy | 0, 1, 1);
+    }
+}
+
+// --- Lavender: tall thin stems topped with purple flower spikes ---
+function drawLavender(c, ox, oy, w, h) {
+    const stems = 4 + (Math.random() * 3 | 0);
+    for (let i = 0; i < stems; i++) {
+        const x = ox + 2 + Math.random() * (w - 4);
+        const baseY = oy + h - 1;
+        const topY = oy + 1 + Math.random() * (h * 0.18);
+        // stem
+        c.fillStyle = "rgba(70,120,70,0.9)";
+        for (let y = baseY; y > topY + (h * 0.35); y--) c.fillRect(x | 0, y | 0, 1, 1);
+        // purple spike of dotted blossoms on the upper third
+        for (let y = topY + (h * 0.35); y > topY; y -= 1.4) {
+            const sway = Math.sin(y) * 0.8;
+            c.fillStyle = `rgba(${150 + (Math.random()*40|0)},${90 + (Math.random()*30|0)},210,0.95)`;
+            c.fillRect((x + sway) | 0, y | 0, 1, 1);
+        }
+    }
+}
+
+// --- Tulips: stems with bright colour cups ---
+function drawTulips(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 0);
+    const tulipCols = [[225,60,60],[245,200,60],[240,130,180],[235,235,235]];
+    const stems = 3 + (Math.random() * 2 | 0);
+    for (let i = 0; i < stems; i++) {
+        const x = ox + 2 + Math.random() * (w - 4);
+        const baseY = oy + h - 1;
+        const topY = oy + 1 + Math.random() * (h * 0.25);
+        c.fillStyle = "rgba(55,120,55,0.95)";
+        for (let y = baseY; y > topY; y--) c.fillRect(x | 0, y | 0, 1, 1);
+        // leaf
+        c.fillRect((x - 1) | 0, (baseY - h * 0.3) | 0, 1, 1);
+        // cup
+        const [r, g, b] = tulipCols[(Math.random() * tulipCols.length) | 0];
+        const cr = Math.max(1.2, w * 0.16);
+        c.fillStyle = `rgb(${r},${g},${b})`;
+        c.beginPath(); c.arc(x, topY, cr, Math.PI, 0); c.fill();        // rounded cup top
+        c.fillRect((x - cr) | 0, topY | 0, Math.max(1, (cr * 2) | 0), 1);
+    }
+}
+
+// --- Pampas / feather grass: tall stems with soft cream plumes ---
+function drawPampas(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 2);
+    const stems = 3 + (Math.random() * 2 | 0);
+    for (let i = 0; i < stems; i++) {
+        const x = ox + 2 + Math.random() * (w - 4);
+        const baseY = oy + h - 1;
+        const topY = oy + 1 + Math.random() * (h * 0.15);
+        const lean = (Math.random() - 0.5) * 2;
+        c.fillStyle = "rgba(120,130,80,0.85)";
+        const steps = (baseY - topY) | 0;
+        for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            c.fillRect((x + lean * t) | 0, (baseY - s) | 0, 1, 1);
+        }
+        // feathery plume blob at top (soft cream)
+        const px = x + lean, py = topY;
+        for (let p = 0; p < 10; p++) {
+            const a = (0.4 + Math.random() * 0.4).toFixed(2);
+            c.fillStyle = `rgba(232,222,190,${a})`;
+            c.fillRect((px + (Math.random() - 0.5) * w * 0.35) | 0,
+                       (py + (Math.random() - 0.2) * h * 0.28) | 0, 1, 1);
+        }
+    }
+}
+
+// --- Reeds / cattails: tall green reeds with brown seed heads ---
+function drawReeds(c, ox, oy, w, h) {
+    const stems = 4 + (Math.random() * 3 | 0);
+    for (let i = 0; i < stems; i++) {
+        const x = ox + 2 + Math.random() * (w - 4);
+        const baseY = oy + h - 1;
+        const topY = oy + 1 + Math.random() * (h * 0.1);
+        const lean = (Math.random() - 0.5) * 1.6;
+        c.fillStyle = "rgba(60,120,60,0.92)";
+        const steps = (baseY - topY) | 0;
+        for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            c.fillRect((x + lean * t) | 0, (baseY - s) | 0, 1, 1);
+        }
+        // brown cattail seed head near the top of ~half the reeds
+        if (Math.random() < 0.6) {
+            const hx = x + lean, hy = topY + h * 0.18;
+            c.fillStyle = "rgba(95,60,30,0.97)";
+            const hh = Math.max(2, h * 0.2);
+            c.fillRect((hx - 0.5) | 0, hy | 0, 2, hh | 0);
+        }
+    }
+}
+
+// --- Glowing mushrooms: cyan caps; the soft glow halo is added per-frame ---
+function drawGlowMushrooms(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 6);
+    const n = 2 + (Math.random() * 3 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const cy = oy + h * 0.4 + Math.random() * (h * 0.4);
+        const cr = Math.max(1, w * 0.14);
+        // pale stem
+        c.fillStyle = "rgba(210,235,230,0.95)";
+        c.fillRect(cx | 0, cy | 0, 1, Math.max(1, cr | 0));
+        // glowing cyan cap
+        c.fillStyle = "rgba(90,225,210,0.97)";
+        c.beginPath(); c.arc(cx, cy, cr, Math.PI, 0); c.fill();
+        // bright core dot
+        c.fillStyle = "rgba(200,255,250,0.95)";
+        c.fillRect((cx - 0.5) | 0, (cy - 0.5) | 0, 1, 1);
+    }
+}
+
+// --- Jungle broadleaf: a clump of rounded green leaves ---
+function drawBroadleaf(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 0);
+    const cx = ox + w * 0.5, cy = oy + h * 0.55;
+    const leaves = 3 + (Math.random() * 3 | 0);
+    for (let i = 0; i < leaves; i++) {
+        const a = (Math.PI * 2 / leaves) * i + Math.random() * 0.5 - Math.PI / 2;
+        const lr = w * (0.22 + Math.random() * 0.12);
+        const lx = cx + Math.cos(a) * w * 0.22;
+        const ly = cy + Math.sin(a) * h * 0.18;
+        c.fillStyle = `rgb(${30 + (Math.random()*20|0)},${95 + (Math.random()*40|0)},${36 + (Math.random()*16|0)})`;
+        c.beginPath();
+        c.ellipse(lx, ly, lr, lr * 0.62, a, 0, Math.PI * 2);
+        c.fill();
+        // midrib highlight
+        c.strokeStyle = "rgba(150,200,120,0.5)";
+        c.lineWidth = 1;
+        c.beginPath(); c.moveTo(cx, cy); c.lineTo(lx, ly); c.stroke();
+    }
+}
+
+// --- Jungle fern: bigger, lusher multi-frond fern ---
+function drawJungleFern(c, ox, oy, w, h) {
+    const fronds = 4 + (Math.random() * 3 | 0);
+    for (let f = 0; f < fronds; f++) {
+        const baseX = ox + w * 0.5 + (Math.random() - 0.5) * w * 0.3;
+        const baseY = oy + h - 1;
+        const ang = -Math.PI / 2 + (Math.random() - 0.5) * 1.6;
+        const len = h * (0.55 + Math.random() * 0.4);
+        const curve = (Math.random() - 0.5) * 4;
+        c.fillStyle = `rgb(${28 + (Math.random()*16|0)},${100 + (Math.random()*30|0)},${34 + (Math.random()*14|0)})`;
+        const steps = len | 0;
+        for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            const sx = baseX + Math.cos(ang) * len * t + curve * t * t;
+            const sy = baseY + Math.sin(ang) * len * t;
+            c.fillRect(sx | 0, sy | 0, 1, 1);
+            if (s % 2 === 0) {
+                const ll = (1 - t) * w * 0.32;
+                c.fillRect((sx - ll) | 0, sy | 0, 1, 1);
+                c.fillRect((sx + ll) | 0, sy | 0, 1, 1);
+            }
+        }
+    }
+}
+
+// --- Elephant-ear: one big broad tropical leaf ---
+function drawElephantEar(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const cx = ox + w * 0.5 + (Math.random() - 0.5) * w * 0.2;
+    const cy = oy + h * 0.5;
+    const lw = w * (0.42 + Math.random() * 0.12);
+    const lh = h * (0.5 + Math.random() * 0.14);
+    const tilt = (Math.random() - 0.5) * 0.8;
+    // shadow
+    c.fillStyle = "rgba(0,0,0,0.22)";
+    c.beginPath(); c.ellipse(cx + 1, cy + 1.5, lw, lh, tilt, 0, Math.PI * 2); c.fill();
+    // leaf
+    c.fillStyle = `rgb(34,${110 + (Math.random()*25|0)},42)`;
+    c.beginPath(); c.ellipse(cx, cy, lw, lh, tilt, 0, Math.PI * 2); c.fill();
+    // lighter half + midrib
+    c.fillStyle = "rgba(120,190,110,0.45)";
+    c.beginPath(); c.ellipse(cx - Math.sin(tilt) * lw * 0.3, cy - lh * 0.25, lw * 0.7, lh * 0.5, tilt, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = "rgba(20,70,26,0.7)";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(cx + Math.sin(tilt) * lh, cy + Math.cos(tilt) * lh);
+    c.lineTo(cx - Math.sin(tilt) * lh, cy - Math.cos(tilt) * lh);
+    c.stroke();
+}
+
+// Weighted ground-cover picker — lush green growth dominates, specials are accents.
+function pickGrassVariant() {
+    const r = Math.random();
+    if (r < 0.46) return (Math.random() * 10) | 0;        // 0-9  lush grass
+    if (r < 0.55) return 10 + (Math.random() * 3 | 0);    // 10-12 tall grass
+    if (r < 0.63) return 34 + (Math.random() * 3 | 0);    // 34-36 jungle plants (broadleaf/fern/ear)
+    if (r < 0.68) return 13 + (Math.random() * 3 | 0);    // 13-15 dry grass (rarer in a jungle)
+    if (r < 0.78) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
+    if (r < 0.82) return 23;    // fern
+    if (r < 0.855) return 28;   // flower patch
+    if (r < 0.88) return 29;    // lavender
+    if (r < 0.905) return 30;   // tulips
+    if (r < 0.925) return 31;   // pampas grass
+    if (r < 0.945) return 32;   // reeds
+    if (r < 0.958) return 22;   // clover
+    if (r < 0.972) return 24;   // shrub
+    if (r < 0.982) return 25;   // dandelion
+    if (r < 0.988) return 26;   // mushrooms
+    if (r < 0.997) return 27;   // berry bush
+    return GRASS_GLOWMUSH;      // glowing mushrooms (~0.3%)
+}
+
+// Rescan the grid for glowing-mushroom cells (cheap; runs on worldgen + ~1×/sec).
+function refreshGlowSpots() {
+    const cell = Math.max(2, props.cellSize | 0);
+    const spots = [];
+    for (let i = 0; i < grid.length; i++) {
+        if (grid[i] === GRASS && grassVar[i] === GRASS_GLOWMUSH) {
+            const y = (i / cols) | 0, x = i - y * cols;
+            spots.push({
+                x: x * cell + cell * 0.5,
+                y: y * cell + cell * 0.55,
+                phase: Math.random() * Math.PI * 2,
+                r: cell * (1.6 + Math.random() * 0.8),
+            });
+        }
+    }
+    glowSpots = spots;
+    glowRefreshAt = 60; // frames until next rescan
+}
+
+// ============================================================
+// Fish — dark shadows gliding under the water surface
+// ============================================================
+function isWaterAt(px, py) {
+    const cell = Math.max(2, props.cellSize | 0);
+    const cx = (px / cell) | 0, cy = (py / cell) | 0;
+    if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) return false;
+    return grid[idx(cx, cy)] === WATER;
+}
+function spawnFish() {
+    fishList = [];
+    if (!props.showFish) return;
+    const cell = Math.max(2, props.cellSize | 0);
+    const water = [];
+    for (let i = 0; i < grid.length; i++) if (grid[i] === WATER) water.push(i);
+    if (!water.length) return;
+    const count = Math.min(44, Math.max(1, (water.length / 30) | 0));
+    for (let k = 0; k < count; k++) {
+        const i = water[(Math.random() * water.length) | 0];
+        const y = (i / cols) | 0, x = i - y * cols;
+        fishList.push({
+            x: x * cell + cell * 0.5,
+            y: y * cell + cell * 0.5,
+            ang: Math.random() * Math.PI * 2,
+            speed: 0.18 + Math.random() * 0.28,
+            size: cell * (0.22 + Math.random() * 0.18),
+            wob: Math.random() * Math.PI * 2,         // tail-wag / wander phase
+        });
+    }
+}
+function updateFish() {
+    if (!props.showFish || !fishList.length) return;
+    for (const f of fishList) {
+        f.wob += 0.12;
+        f.ang += Math.sin(f.wob * 0.3) * 0.05;        // gentle meander
+        const nx = f.x + Math.cos(f.ang) * f.speed * 2.2;
+        const ny = f.y + Math.sin(f.ang) * f.speed * 2.2;
+        if (isWaterAt(nx, ny)) { f.x = nx; f.y = ny; }
+        else { f.ang += 1.9 + Math.random() * 0.8; }  // bounce off the shore
+    }
+}
+
+// ============================================================
+// Init / resize
+// ============================================================
+function rebuildGrid() {
+    const cell = Math.max(2, props.cellSize | 0);
+    // World is "worldSize" times the viewport in each dimension, so there's room
+    // for the camera to pan around. worldSize 1 = world == screen (no pan).
+    const ws = Math.max(1, props.worldSize || 1);
+    cols = Math.ceil(canvas.width  * ws / cell) + 1;
+    rows = Math.ceil(canvas.height * ws / cell) + 1;
+    worldPxW = cols * cell;
+    worldPxH = rows * cell;
+
+    buildSpriteAtlases();
+
+    const n = cols * rows;
+    grid       = new Uint8Array(n);
+    burnTimer  = new Float32Array(n);
+    burnMax    = new Float32Array(n);
+    fireHeat   = new Float32Array(n);
+    treeGrowth = new Float32Array(n);
+    treeVar    = new Uint8Array(n);
+    grassVar   = new Uint8Array(n);
+    rockVar    = new Uint8Array(n);
+    jitterX    = new Int8Array(n);
+    jitterY    = new Int8Array(n);
+    waterPhase = new Uint8Array(n);
+    smokeParticles = [];
+    embers = [];
+    leaves = [];
+    lightningBolts = [];
+    lightningGlows = [];
+    flamePlumes = [];
+    sparks = [];
+    birds = [];
+    fireflies = [];
+    rainDrops = [];
+    burningCount = 0;
+
+    buildRockSprites();
+
+    // Fresh world seed on every rebuild
+    terrainSeed = (Math.random() * 1e6) | 0;
+
+    // Path detection — narrow noise band creates winding dirt trails.
+    // Tighter band than before = fewer, more occasional paths.
+    const PATH_LOW  = 0.490;
+    const PATH_HIGH = 0.510;
+    const isPath = (x, y) => {
+        if (!props.showPaths) return false;
+        const n = fbm(x * 0.045, y * 0.045, terrainSeed + 7000, 2);
+        return n > PATH_LOW && n < PATH_HIGH;
+    };
+    // River detection — narrow band on a different noise channel
+    const RIVER_LOW  = 0.478;
+    const RIVER_HIGH = 0.522;
+    const isRiver = (x, y) => {
+        if (!props.showRivers) return false;
+        const n = fbm(x * 0.030, y * 0.030, terrainSeed + 8000, 2);
+        return n > RIVER_LOW && n < RIVER_HIGH;
+    };
+
+    // Jitter range: ±25% of cell size, in pixels
+    const jRange = Math.max(1, (cell * 0.25) | 0);
+    // Noise frequencies
+    const NS_TREE  = 0.060; // tree biome scale
+    const NS_GRASS = 0.045; // grass biome scale (larger features)
+    const NS_WATER = 0.040; // water body scale (larger features)
+    const WATER_THRESHOLD = 0.74; // raise for less water, lower for more
+
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const i = y * cols + x;
+
+            jitterX[i] = ((Math.random() * (jRange * 2 + 1)) | 0) - jRange;
+            jitterY[i] = ((Math.random() * (jRange * 2 + 1)) | 0) - jRange;
+            // bits 0-3 only — bits 4-7 are reserved flags
+            waterPhase[i] = (Math.random() * 16) | 0;
+
+            // --- Water: large-scale noise blobs (ponds) + narrow rivers ---
+            const waterN = fbm(x * NS_WATER, y * NS_WATER, terrainSeed + 5000, 3);
+            const isPond = waterN > WATER_THRESHOLD;
+            if (isPond || isRiver(x, y)) {
+                grid[i] = WATER;
+                // Lily pads only on ponds (not rivers — flowing water = no pads)
+                if (props.showLilyPads && isPond && Math.random() < 0.08) {
+                    waterPhase[i] |= 0x40;
+                    if (Math.random() < 0.5) waterPhase[i] |= 0x20;
+                }
+                continue;
+            }
+
+            // --- Path: narrow noise band winds dirt trails through forest ---
+            if (props.showPaths && isPath(x, y)) {
+                grid[i] = DIRT;
+                waterPhase[i] |= 0x80; // mark for path tint
+                continue;
+            }
+
+            // --- Biome modulators ---
+            // Tree biome 0..1 -> creates clearings and dense pockets
+            const tBiome = fbm(x * NS_TREE,  y * NS_TREE,  terrainSeed + 1000, 3);
+            // Grass biome 0..1 -> meadows vs sparse
+            const gBiome = fbm(x * NS_GRASS, y * NS_GRASS, terrainSeed + 2000, 2);
+
+            // Multiply user density by biome value (range ~0.2× to ~1.8×)
+            const localTree  = props.treeDensity  * (0.20 + tBiome * 1.60);
+            const localGrass = props.grassDensity * (0.40 + gBiome * 1.10);
+
+            if (Math.random() < localTree) {
+                grid[i] = TREE;
+                treeVar[i]  = pickTreeVariant();
+                grassVar[i] = pickGrassVariant();
+                // Established forest: mostly mature with natural size variety
+                treeGrowth[i] = 0.7 + Math.random() * 0.3;
+            } else if (Math.random() < localGrass) {
+                grid[i] = GRASS;
+                grassVar[i] = pickGrassVariant();
+            } else if (props.showRocks && Math.random() < props.rockDensity) {
+                grid[i] = ROCK;
+                rockVar[i] = (Math.random() * ROCK_NUM_VARIANTS) | 0;
+            } else {
+                grid[i] = DIRT;
+            }
+        }
+    }
+
+    // Second pass — mark water cells adjacent to vegetation as "shoreline shaded"
+    // (bit 0x10) so we can tint them green like a tree reflection
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const i = y * cols + x;
+            if (grid[i] !== WATER) continue;
+            for (let d = 0; d < NEIGHBOURS.length; d++) {
+                const nx = x + NEIGHBOURS[d][0];
+                const ny = y + NEIGHBOURS[d][1];
+                if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+                const ns = grid[idx(nx, ny)];
+                if (ns === TREE || ns === BURN_TREE) {
+                    waterPhase[i] |= 0x10; // shoreline reflection
+                    break;
+                }
+            }
+        }
+    }
+
+    refreshGlowSpots();
+    spawnFish();
+    markTerrainDirty();
+}
+
+function resize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    // The visible canvas is the viewport...
+    canvas.width  = w;
+    canvas.height = h;
+    if (!glowCanvas) {
+        glowCanvas = document.createElement("canvas");
+        glowCtx    = glowCanvas.getContext("2d");
+    }
+
+    rebuildGrid();          // sizes the (larger) world grid + worldPxW/H
+
+    // ...the world-space layers are sized to the whole world.
+    bgCanvas.width  = worldPxW;
+    bgCanvas.height = worldPxH;
+    glowCanvas.width  = worldPxW;
+    glowCanvas.height = worldPxH;
+
+    drawDirtBackground();   // draws the world floor into bgCanvas
+    windStreaks = [];
+}
+
+function idx(x, y) { return y * cols + x; }
+
+// ============================================================
+// Ignition
+// ============================================================
+function igniteCell(i) {
+    const s = grid[i];
+    if (s === TREE) {
+        grid[i] = BURN_TREE;
+        burnTimer[i] = BURN_BASE * props.treeBurnDuration * (0.8 + Math.random() * 0.4);
+        burnMax[i]   = burnTimer[i];   // remember full duration for the lifecycle curve
+        fireHeat[i]  = 0;
+        burningCount++;
+        return true;
+    } else if (s === GRASS) {
+        grid[i] = BURN_GRASS;
+        burnTimer[i] = BURN_BASE * props.grassBurnDuration * (0.8 + Math.random() * 0.4);
+        burnMax[i]   = burnTimer[i];
+        fireHeat[i]  = 0;
+        burningCount++;
+        return true;
+    }
+    return false;
+}
+
+function igniteAt(px, py, radius) {
+    const cell = Math.max(2, props.cellSize | 0);
+    const cx = (px / cell) | 0;
+    const cy = (py / cell) | 0;
+    const r  = Math.max(1, radius | 0);
+    let n = 0;
+    for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+            if (dx*dx + dy*dy > r*r) continue;
+            const nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            if (igniteCell(idx(nx, ny))) n++;
+        }
+    }
+    return n;
+}
+
+function randomSpark() {
+    // Strike anywhere in the world (world pixel coordinates).
+    for (let attempt = 0; attempt < 30; attempt++) {
+        const x = Math.random() * worldPxW;
+        const y = Math.random() * worldPxH;
+        if (igniteAt(x, y, 1) > 0) {
+            spawnLightning(x, y);
+            rgbVignettePulse = 1.0;
+            return;
+        }
+    }
+}
+
+// ============================================================
+// Lightning bolts (jagged branching strikes when auto-ignite fires)
+// ============================================================
+function spawnLightning(targetX, targetY) {
+    if (lightningBolts.length >= MAX_LIGHTNING) return;
+    const startX = targetX + (Math.random() - 0.5) * 240;
+    const startY = -20;
+    const segs = 14 + ((Math.random() * 8) | 0);
+    const points = [[startX, startY]];
+    for (let i = 1; i < segs; i++) {
+        const t = i / segs;
+        const lx = startX * (1 - t) + targetX * t;
+        const ly = startY * (1 - t) + targetY * t;
+        points.push([lx + (Math.random() - 0.5) * 36, ly + (Math.random() - 0.5) * 22]);
+    }
+    points.push([targetX, targetY]);
+
+    // 1–3 branches breaking off mid-bolt
+    const branches = [];
+    const bn = 1 + ((Math.random() * 3) | 0);
+    for (let b = 0; b < bn; b++) {
+        const from = 2 + ((Math.random() * (segs - 4)) | 0);
+        const [bx, by] = points[from];
+        const ang = Math.random() * Math.PI * 2;
+        const len = 30 + Math.random() * 80;
+        const bsegs = 4 + ((Math.random() * 4) | 0);
+        const bpts = [[bx, by]];
+        for (let j = 1; j <= bsegs; j++) {
+            const t = j / bsegs;
+            bpts.push([
+                bx + Math.cos(ang) * len * t + (Math.random() - 0.5) * 18,
+                by + Math.sin(ang) * len * t + (Math.random() - 0.5) * 18,
+            ]);
+        }
+        branches.push(bpts);
+    }
+
+    lightningBolts.push({ points, branches, life: 1.0, flash: 1.0, jitter: 0 });
+    // Persistent afterglow column at strike point
+    lightningGlows.push({ x: targetX, y: targetY, life: 1.0 });
+}
+
+function updateLightningGlows() {
+    if (!lightningGlows.length) return;
+    let writeI = 0;
+    for (let i = 0; i < lightningGlows.length; i++) {
+        const g = lightningGlows[i];
+        g.life -= 0.012;
+        if (g.life > 0) lightningGlows[writeI++] = g;
+    }
+    lightningGlows.length = writeI;
+}
+
+function drawLightningGlows() {
+    if (!lightningGlows.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "screen";
+    for (const g of lightningGlows) {
+        const a = g.life;
+        const grad = ctx.createRadialGradient(g.x, g.y, 8, g.x, g.y, 90 + a * 60);
+        grad.addColorStop(0,   `rgba(220,235,255,${(a * 0.65).toFixed(3)})`);
+        grad.addColorStop(1,   "rgba(150,180,255,0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(g.x, g.y, 90 + a * 60, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+function updateLightning() {
+    if (!lightningBolts.length) return;
+    let writeI = 0;
+    for (let i = 0; i < lightningBolts.length; i++) {
+        const b = lightningBolts[i];
+        b.life -= 0.07;
+        b.flash *= 0.78;
+        b.jitter = (b.jitter + 1) & 7;
+        if (b.life > 0) lightningBolts[writeI++] = b;
+    }
+    lightningBolts.length = writeI;
+}
+
+function drawLightning() {
+    if (!lightningBolts.length) return;
+
+    // Composite screen flash (sum of all bolts) — softened, and only the
+    // full-screen wash is gated behind the Screen-effects toggle.
+    if (props.screenEffects) {
+        let maxFlash = 0;
+        for (const b of lightningBolts) if (b.flash > maxFlash) maxFlash = b.flash;
+        if (maxFlash > 0.05) {
+            ctx.fillStyle = `rgba(255,240,225,${(maxFlash * 0.18).toFixed(3)})`;
+            // drawn under the world translate, so offset to cover the visible screen
+            ctx.fillRect(camX, camY, canvas.width, canvas.height);
+        }
+    }
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const b of lightningBolts) {
+        const a = Math.max(0, Math.min(1, b.life));
+
+        // Glow halo
+        ctx.lineWidth = 6 + b.flash * 12;
+        ctx.strokeStyle = `rgba(170,200,255,${(a * 0.35).toFixed(3)})`;
+        ctx.beginPath();
+        for (let i = 0; i < b.points.length; i++) {
+            const [x, y] = b.points[i];
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Core bolt
+        ctx.lineWidth = 2 + b.flash * 3;
+        ctx.strokeStyle = `rgba(235,240,255,${a.toFixed(3)})`;
+        ctx.beginPath();
+        for (let i = 0; i < b.points.length; i++) {
+            const [x, y] = b.points[i];
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Branches
+        ctx.lineWidth = 1 + b.flash * 1.5;
+        ctx.strokeStyle = `rgba(200,215,255,${(a * 0.75).toFixed(3)})`;
+        for (const bp of b.branches) {
+            ctx.beginPath();
+            for (let i = 0; i < bp.length; i++) {
+                const [x, y] = bp[i];
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+    }
+    ctx.restore();
+}
+
+// ============================================================
+// Ambient drifting leaves (always present when wind is on)
+// ============================================================
+const LEAF_COLORS = [
+    [ 85, 130,  35],   // green
+    [105,  95,  28],   // yellow
+    [130,  60,  20],   // orange
+    [ 60,  90,  25],   // dark green
+    [125,  85,  35],   // tan
+];
+
+// ============================================================
+// Weather — auto-cycles modes or honors the user's choice
+// ============================================================
+function weatherIntensityForMode(mode) {
+    return WEATHER_MOISTURE[mode] || 0;
+}
+// Convenience — returns the current *smoothed* moisture; what to actually use for spawning.
+function weatherIntensity() {
+    return weatherIntensitySmooth;
+}
+// Smoothly-interpolated fire-spread multiplier (drought boosts, wet damps).
+function weatherFireMul() {
+    return WEATHER_FIRE_MUL[weatherCurrent] || 1.0;
+}
+// Dryness 0..1 — peaks in drought, used for the warm/parched ambient tint.
+function weatherDryness() {
+    return weatherCurrent === WEATHER_DROUGHT ? (1 - weatherIntensitySmooth) : 0;
+}
+
+function targetWeatherFromMode() {
+    switch (props.weatherMode) {
+        case "drought": return WEATHER_DROUGHT;
+        case "clear":   return WEATHER_CLEAR;
+        case "cloudy":  return WEATHER_CLOUDY;
+        case "rain":    return WEATHER_RAIN;
+        case "monsoon": return WEATHER_MONSOON;
+        case "storm":   return WEATHER_STORM;
+        default: return null; // auto
+    }
+}
+
+function updateWeather() {
+    const forced = targetWeatherFromMode();
+    if (forced !== null) {
+        weatherTarget = forced;
+    } else {
+        // Auto-cycle: random-walk one step along the spectrum so changes are
+        // gradual and sensible (never jumps sunny → storm). Mild mean-reversion
+        // toward the middle keeps it from parking at an extreme.
+        weatherTimer -= props.weatherChangeSpeed;
+        if (weatherTimer <= 0 && weatherCurrent === weatherTarget) {
+            const mid = (WEATHER_COUNT - 1) / 2;
+            const towardMid = weatherTarget < mid ? 0.62 : (weatherTarget > mid ? 0.38 : 0.5);
+            let step = Math.random() < towardMid ? 1 : -1;
+            weatherTarget = Math.max(0, Math.min(WEATHER_COUNT - 1, weatherTarget + step));
+            weatherTimer = 900 + Math.random() * 2200;
+        }
+    }
+
+    // Step current toward target one stage at a time, easing the blend each stage
+    if (weatherCurrent !== weatherTarget) {
+        weatherBlend -= (forced !== null ? 0.010 : 0.007) * props.weatherChangeSpeed;
+        if (weatherBlend <= 0) {
+            weatherCurrent += (weatherTarget > weatherCurrent ? 1 : -1); // one stage at a time
+            weatherBlend = 1.0;
+        }
+    }
+
+    // Smooth moisture toward the target mode, not just the stage label.
+    // This lets forced Storm/Rain begin as a light scattered front and escalate
+    // gradually while weatherCurrent still walks through the intermediate modes.
+    const targetIntensity = WEATHER_MOISTURE[weatherTarget];
+    const intensityStep   = 0.0018 * props.weatherChangeSpeed;
+    if (weatherIntensitySmooth < targetIntensity) {
+        weatherIntensitySmooth = Math.min(targetIntensity, weatherIntensitySmooth + intensityStep);
+    } else if (weatherIntensitySmooth > targetIntensity) {
+        weatherIntensitySmooth = Math.max(targetIntensity, weatherIntensitySmooth - intensityStep * 1.4);
+    }
+
+    // Front progress — advances when weather is (heading) wet, recedes when drying.
+    const wantsFront    = WEATHER_MOISTURE[weatherTarget] > 0.10
+                       || weatherIntensitySmooth > 0.10;
+    const frontStep     = 0.0032 * props.weatherChangeSpeed;
+    const targetFront   = wantsFront ? 1.0 : 0.0;
+    if (weatherFrontProgress < targetFront) {
+        weatherFrontProgress = Math.min(1.0, weatherFrontProgress + frontStep);
+    } else if (weatherFrontProgress > targetFront) {
+        weatherFrontProgress = Math.max(0.0, weatherFrontProgress - frontStep);
+    }
+}
+
+// Map weatherDirection property to a vector (vx, vy) and an inFront(x, y) test
+function weatherFrontCovers(px, py) {
+    return weatherFrontAmount(px, py) > 0.12;
+}
+
+function smooth01(t) {
+    t = Math.max(0, Math.min(1, t));
+    return t * t * (3 - 2 * t);
+}
+
+function weatherFrontAmount(px, py) {
+    if (weatherFrontProgress <= 0) return 0;
+    const w = worldPxW, h = worldPxH;
+    const fx = px / w;
+    const fy = py / h;
+    const feather = 0.16;
+    let distanceInside;
+    switch (props.weatherDirection) {
+        case "rightToLeft":  distanceInside = fx - (1 - weatherFrontProgress); break;
+        case "topToBottom":  distanceInside = weatherFrontProgress - fy; break;
+        case "bottomToTop":  distanceInside = fy - (1 - weatherFrontProgress); break;
+        case "static":       distanceInside = 1; break;
+        case "leftToRight":
+        default:             distanceInside = weatherFrontProgress - fx; break;
+    }
+    if (distanceInside <= 0) return 0;
+
+    const frontSoftness = props.weatherDirection === "static"
+        ? 1
+        : smooth01(distanceInside / feather);
+    const scatter = Math.max(0, Math.min(1, props.rainScatter));
+    if (scatter <= 0.01) return frontSoftness;
+
+    const driftX = frame * 0.004 * Math.cos(windAngle);
+    const driftY = frame * 0.004 * Math.sin(windAngle);
+    const patch = fbm(px * 0.006 + driftX, py * 0.006 + driftY, terrainSeed + 931, 3);
+    const patchFactor = 1 - scatter + scatter * smooth01((patch - 0.24) / 0.56);
+    return frontSoftness * patchFactor;
+}
+
+// Where new rain particles should spawn — returns (xFrac, yFrac) in 0..1
+function weatherFrontSpawn() {
+    const w = worldPxW, h = worldPxH;
+    for (let tries = 0; tries < 24; tries++) {
+        const x = Math.random() * w;
+        const y = Math.random() * h;
+        const amount = weatherFrontAmount(x, y);
+        if (amount > 0.05 && Math.random() < amount) return [x, y, amount];
+    }
+    switch (props.weatherDirection) {
+        case "rightToLeft":  return [w * (1 - weatherFrontProgress * Math.random()), Math.random() * h, 0.5];
+        case "topToBottom":  return [Math.random() * w, h * weatherFrontProgress * Math.random(), 0.5];
+        case "bottomToTop":  return [Math.random() * w, h * (1 - weatherFrontProgress * Math.random()), 0.5];
+        case "static":       return [Math.random() * w, Math.random() * h, 0.7];
+        case "leftToRight":
+        default:             return [w * weatherFrontProgress * Math.random(), Math.random() * h, 0.5];
+    }
+}
+
+// ============================================================
+// Clouds — large drifting dark patches that shadow the ground
+// ============================================================
+function spawnCloud() {
+    const w = worldPxW, h = worldPxH;
+    const wxF = Math.cos(windAngle);
+    const wyF = Math.sin(windAngle);
+    let cx, cy;
+    if (Math.abs(wxF) > Math.abs(wyF)) {
+        cx = wxF > 0 ? -200 : w + 200;
+        cy = Math.random() * h;
+    } else {
+        cy = wyF > 0 ? -200 : h + 200;
+        cx = Math.random() * w;
+    }
+    clouds.push({
+        x: cx, y: cy,
+        vx: wxF * 0.25,
+        vy: wyF * 0.25,
+        size: 180 + Math.random() * 220,
+        opacity: 0.18 + Math.random() * 0.18,
+    });
+}
+
+function updateClouds() {
+    const intensity = weatherIntensity();
+    if (!props.showClouds || intensity < 0.2) {
+        // Fade existing clouds out (in place)
+        let writeI = 0;
+        for (let i = 0; i < clouds.length; i++) {
+            const c = clouds[i];
+            c.opacity -= 0.005;
+            if (c.opacity > 0) clouds[writeI++] = c;
+        }
+        clouds.length = writeI;
+        return;
+    }
+    const targetClouds = Math.ceil(intensity * MAX_CLOUDS);
+    if (clouds.length < targetClouds && Math.random() < 0.06) spawnCloud();
+
+    const wxF = Math.cos(windAngle);
+    const wyF = Math.sin(windAngle);
+    let writeI = 0;
+    for (let i = 0; i < clouds.length; i++) {
+        const c = clouds[i];
+        c.vx = c.vx * 0.97 + wxF * 0.25 * 0.05 * (1 + props.windStrength);
+        c.vy = c.vy * 0.97 + wyF * 0.25 * 0.05 * (1 + props.windStrength);
+        c.x += c.vx;
+        c.y += c.vy;
+        if (c.x > -c.size && c.x < worldPxW + c.size
+         && c.y > -c.size && c.y < worldPxH + c.size) {
+            clouds[writeI++] = c;
+        }
+    }
+    clouds.length = writeI;
+}
+
+// ============================================================
+// Rain — falling streaks influenced by wind; can extinguish fires
+// ============================================================
+function updateRain() {
+    // Use smoothed intensity so escalation is gradual
+    const intensity = weatherIntensitySmooth;
+    const isWet = intensity > 0.05 && weatherFrontProgress > 0.01;
+
+    if (isWet && props.rainIntensity > 0) {
+        const wxF = Math.cos(windAngle);
+        const wyF = Math.sin(windAngle);
+        const rainSpawn = Math.min(60, 18 * intensity * props.rainIntensity + 8 * intensity * intensity);
+        const rainCap = (MAX_RAIN * qMul) | 0;
+        for (let n = 0; n < rainSpawn; n++) {
+            if (rainDrops.length >= rainCap) break;
+            // Spawn position constrained to the advancing, patchy front.
+            const [sx, sy, localAmount] = weatherFrontSpawn();
+            rainDrops.push({
+                x: sx,
+                y: sy - 18 - Math.random() * 32,
+                vx: wxF * 2.0 * props.windStrength + (Math.random() - 0.5) * 0.75,
+                vy: 7 + Math.random() * 4 + intensity * 3,
+                len: (5 + Math.random() * 6 + intensity * 4) * (0.75 + localAmount * 0.5),
+            });
+        }
+
+        // Occasionally extinguish a burning cell
+        if (props.rainExtinguishes && burningCount > 0) {
+            const tries = Math.ceil(intensity * 3);
+            const cell = Math.max(2, props.cellSize | 0);
+            for (let t = 0; t < tries; t++) {
+                if (Math.random() < intensity * 0.6) {
+                    // Find a random burning cell and extinguish it
+                    const sampleStart = (Math.random() * grid.length) | 0;
+                    for (let k = 0; k < 200; k++) {
+                        const i = (sampleStart + k) % grid.length;
+                        if (grid[i] === BURN_GRASS || grid[i] === BURN_TREE) {
+                            const py = ((i / cols) | 0) * cell + cell * 0.5;
+                            const px = (i % cols) * cell + cell * 0.5;
+                            if (weatherFrontAmount(px, py) < Math.random() * 0.85) continue;
+                            const isTree = grid[i] === BURN_TREE;
+                            grid[i] = isTree ? ASH_TREE : ASH_GRASS;
+                            burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;
+                            burningCount--;
+                            markStaticDirty();
+                            // Steam puff
+                            if (smokeParticles.length < MAX_SMOKE) {
+                                smokeParticles.push({
+                                    x: px,
+                                    y: py,
+                                    vx: 0, vy: -1.0,
+                                    life: 0.5, size: 5, grow: 0.3,
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Physics + cull (in-place)
+    if (rainDrops.length) {
+        const maxY = worldPxH + 20;
+        const minX = -50;
+        const maxX = worldPxW + 50;
+        let writeI = 0;
+        for (let i = 0; i < rainDrops.length; i++) {
+            const r = rainDrops[i];
+            r.x += r.vx;
+            r.y += r.vy;
+            if (r.y < maxY && r.x > minX && r.x < maxX) {
+                rainDrops[writeI++] = r;
+            }
+        }
+        rainDrops.length = writeI;
+    }
+}
+
+// ============================================================
+// Birds (flocks crossing the screen periodically)
+// ============================================================
+function spawnBirdFlock() {
+    const w = worldPxW, h = worldPxH;
+    const side = (Math.random() * 4) | 0;
+    const angle = Math.random() * 0.6 - 0.3; // mostly horizontal
+    const speed = 1.4 + Math.random() * 1.0;
+    let bx, by, vx, vy;
+    if (side === 0)      { bx = -30; by = Math.random() * h; vx =  speed * Math.cos(angle); vy = speed * Math.sin(angle); }
+    else if (side === 1) { bx = w + 30; by = Math.random() * h; vx = -speed * Math.cos(angle); vy = speed * Math.sin(angle); }
+    else if (side === 2) { bx = Math.random() * w; by = -30; vx = speed * Math.sin(angle); vy =  speed * Math.cos(angle); }
+    else                 { bx = Math.random() * w; by = h + 30; vx = speed * Math.sin(angle); vy = -speed * Math.cos(angle); }
+
+    // 4–9 birds per flock with V-formation jitter
+    const count = 4 + ((Math.random() * 6) | 0);
+    for (let i = 0; i < count; i++) {
+        // V-formation: leader at front, others trail behind on both sides
+        const lag = i * 14;
+        const lateral = ((i % 2) ? 1 : -1) * Math.ceil(i / 2) * 10;
+        const px = bx - (vx / speed) * lag + (-vy / speed) * lateral;
+        const py = by - (vy / speed) * lag + ( vx / speed) * lateral;
+        birds.push({
+            x: px, y: py,
+            vx: vx + (Math.random() - 0.5) * 0.1,
+            vy: vy + (Math.random() - 0.5) * 0.1,
+            flap: Math.random() * Math.PI * 2,
+            flapSpd: 0.32 + Math.random() * 0.10,
+            size: 1.6 + Math.random() * 0.6,
+        });
+    }
+}
+
+// ============================================================
+// Fireflies (subtle glowing drifters — atmosphere)
+// ============================================================
+function spawnFirefly() {
+    fireflies.push({
+        x: Math.random() * worldPxW,
+        y: Math.random() * worldPxH,
+        vx: (Math.random() - 0.5) * 0.30,
+        vy: (Math.random() - 0.5) * 0.30,
+        phase: Math.random() * Math.PI * 2,
+        phaseSpd: 0.04 + Math.random() * 0.03,
+        size: 1.3 + Math.random() * 0.6,
+        life: 0.85 + Math.random() * 0.15,
+    });
+}
+
+function spawnLeaf() {
+    const w = worldPxW, h = worldPxH;
+    const wxF = Math.cos(windAngle);
+    const wyF = Math.sin(windAngle);
+    let x, y;
+    if (Math.abs(wxF) > Math.abs(wyF)) {
+        x = wxF > 0 ? -10 : w + 10;
+        y = Math.random() * h;
+    } else {
+        y = wyF > 0 ? -10 : h + 10;
+        x = Math.random() * w;
+    }
+    const color = LEAF_COLORS[(Math.random() * LEAF_COLORS.length) | 0];
+    leaves.push({
+        x, y,
+        vx: wxF * (0.7 + Math.random() * 1.0),
+        vy: wyF * (0.7 + Math.random() * 1.0),
+        size: 1.2 + Math.random() * 1.6,
+        rot: Math.random() * Math.PI * 2,
+        rotSpd: (Math.random() - 0.5) * 0.12,
+        life: 1.0,
+        color,
+    });
+}
+
+// ============================================================
+// Simulation update
+// ============================================================
+function update() {
+    // Wind — base + gust burst, audio bass also nudges strength briefly
+    windAngle += 0.003 * props.windRotation;
+    const effectiveWind = props.windStrength + gustStrength + (props.audioReactive ? audioBass * 0.6 : 0);
+    const wxF = Math.cos(windAngle);
+    const wyF = Math.sin(windAngle);
+    const wMag = 0.020 * effectiveWind;
+    const wxN = wxF * wMag;
+    const wyN = wyF * wMag;
+
+    // Fire spread also responds to weather: drought fans it, wet damps it.
+    const fireMul = weatherFireMul();
+    const sg = BASE_SPREAD_GRASS * props.spreadRate * fireMul;
+    const st = BASE_SPREAD_TREE  * props.spreadRate * fireMul;
+
+    // Random sparks (lightning strikes / dry-heat ignitions)
+    // Rate is per-weather: storm peaks, monsoon moderate, drought low but nonzero.
+    if (props.autoIgnite) {
+        let chance = (1 / (10 * 60)) * props.autoIgniteRate;
+        const wetStormRamp = Math.max(0, Math.min(1, weatherIntensitySmooth));
+        const targetLightning = WEATHER_LIGHTNING[weatherTarget] || 1;
+        const currentLightning = WEATHER_LIGHTNING[weatherCurrent] || 1;
+        chance *= currentLightning + (targetLightning - currentLightning) * wetStormRamp;
+        if (Math.random() < chance) randomSpark();
+    }
+
+    // Collect currently-burning cells so spread uses current state
+    const burningList = [];
+    for (let i = 0; i < grid.length; i++) {
+        const s = grid[i];
+        if (s === BURN_GRASS || s === BURN_TREE) burningList.push(i);
+    }
+
+    const cell = Math.max(2, props.cellSize | 0);
+
+    for (let k = 0; k < burningList.length; k++) {
+        const i = burningList[k];
+        burnTimer[i] -= 1;
+
+        const isTree = grid[i] === BURN_TREE;
+
+        if (burnTimer[i] <= 0) {
+            grid[i] = isTree ? ASH_TREE : ASH_GRASS;
+            burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;  // short smoulder phase
+            fireHeat[i] = 0;
+            burningCount--;
+            markStaticDirty(); // grass tuft → ash patch baked
+            continue;
+        }
+
+        const y = (i / cols) | 0;
+        const x = i - y * cols;
+
+        // --- Lifecycle: smolder → grow → blaze → die ---
+        const age = burnMax[i] > 0 ? (1 - burnTimer[i] / burnMax[i]) : 0;
+        const intensity = burnIntensity(age);
+        // Spread gate: a cell can only spread once it's an established flame,
+        // and only while it's hot. This stops the instant-leap fast spread.
+        const spreadGate = Math.max(0, (intensity - 0.50)) / 0.50; // 0 until intensity>0.50 → 1
+
+        // --- Count burning neighbours (the clustering "blaze" heat) + spread ---
+        let burningNeighbors = 0;
+        for (let d = 0; d < NEIGHBOURS.length; d++) {
+            const dx = NEIGHBOURS[d][0];
+            const dy = NEIGHBOURS[d][1];
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            const ni = idx(nx, ny);
+            const ns = grid[ni];
+            if (ns === BURN_TREE || ns === BURN_GRASS) { burningNeighbors++; continue; }
+            if (spreadGate <= 0) continue;
+            let spread;
+            if (ns === GRASS)      spread = sg;
+            else if (ns === TREE)  spread = st;
+            else continue;
+            const windBonus = dx * wxN + dy * wyN;
+            const chance = (spread + Math.max(0, windBonus)) * spreadGate;
+            if (chance > 0 && Math.random() < chance) {
+                igniteCell(ni);
+            }
+        }
+
+        // Heat 0..1 from neighbour density, smoothed toward the new value so a
+        // packed blaze ramps up its glow rather than snapping.
+        const heatTarget = burningNeighbors / 8;
+        fireHeat[i] += (heatTarget - fireHeat[i]) * 0.25;
+        const heat = fireHeat[i];
+
+        // Effective output scales with how big the flame currently is (intensity)
+        // plus a conflagration bonus when surrounded by other fire (heat).
+        const output = intensity * (1 + heat * 0.6);
+
+        // Smoke — little while smoldering, billowing at blaze peak
+        if (props.showSmoke && smokeParticles.length < (MAX_SMOKE * qMul) | 0) {
+            const smokeChance = (isTree ? 0.11 : 0.05) * output;
+            if (Math.random() < smokeChance) {
+                const sMag = 0.7 * props.windStrength;
+                const shade = isTree
+                    ? (95 + Math.random() * 90) | 0
+                    : (160 + Math.random() * 70) | 0;
+                smokeParticles.push({
+                    x:    x * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
+                    y:    y * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
+                    vx:   wxF * sMag + (Math.random() - 0.5) * 0.4,
+                    vy:   wyF * sMag + (Math.random() - 0.5) * 0.4,
+                    life: isTree ? 1.0 : 0.55,
+                    size: (isTree ? 4 : 2) + Math.random() * 3,
+                    grow: isTree ? 0.22 : 0.10,
+                    shade,
+                });
+            }
+        }
+
+        // Embers — more thrown from a roaring, clustered blaze
+        if (props.showEmbers && embers.length < (MAX_EMBERS * qMul) | 0) {
+            const emberChance = (isTree ? 0.10 : 0.025) * output;
+            if (Math.random() < emberChance) {
+                embers.push({
+                    x: x * cell + cell * 0.5,
+                    y: y * cell + cell * 0.5,
+                    vx: wxF * (0.9 + Math.random() * 1.2) * props.windStrength + (Math.random() - 0.5) * 1.2,
+                    vy: wyF * (0.9 + Math.random() * 1.2) * props.windStrength + (Math.random() - 0.5) * 1.2,
+                    life: 0.7 + Math.random() * 0.5,
+                    size: 1.0 + Math.random() * 1.3,
+                    phase: Math.random() * 6.28,
+                });
+            }
+        }
+
+        // Flame tongues — frequency AND size grow with the flame's intensity + heat.
+        // Each gets a random shape "kind" + a curl direction so the fire is varied.
+        if (props.showFlamePlumes && flamePlumes.length < (MAX_PLUMES * qMul) | 0) {
+            const plumeChance = (isTree ? 0.34 : 0.13) * output;
+            if (Math.random() < plumeChance) {
+                const sizeBase = (isTree ? 2.2 : 1.2) * (0.25 + intensity * 1.05) * (1 + heat * 0.7);
+                // kind: 0 standard, 1 tall wispy, 2 wide squat, 3 curly licker.
+                // Occasional taller flare-up at peak intensity.
+                let kind = (Math.random() * 4) | 0;
+                const flare = (intensity > 0.85 && Math.random() < 0.12) ? 1 : 0;
+                // Magic fire: whole blocks of cells burn in one magic colour, so
+                // you get coherent patches of cyan / green / purple / blue / pink
+                // flame rather than washed-out confetti.
+                let mtype = 0;
+                if (props.magicFire > 0) {
+                    const bx = (x / 6) | 0, by = (y / 6) | 0;
+                    const bh = (((bx * 73856093) ^ (by * 19349663)) >>> 0) / 4294967295;
+                    if (bh < props.magicFire) mtype = 1 + ((bx * 3 + by * 5) % MAGIC_FIRE.length);
+                }
+                flamePlumes.push({
+                    x: x * cell + cell * 0.5 + jitterX[i] + (Math.random() - 0.5) * cell * 0.35,
+                    y: y * cell + cell * 0.5 + jitterY[i] + (Math.random() - 0.5) * cell * 0.35,
+                    vx: wxF * 0.35 * props.windStrength + (Math.random() - 0.5) * 0.5,
+                    vy: wyF * 0.35 * props.windStrength - 0.25 + (Math.random() - 0.5) * 0.4,
+                    size: sizeBase + Math.random() * 1.2,
+                    life: 0.6 + Math.random() * 0.4,
+                    phase: Math.random() * 100,
+                    hot: heat,
+                    kind, flare, mtype,
+                    curl: (Math.random() - 0.5) * 1.6,     // sideways lick
+                });
+                // Crackling sparks pop off vigorous, hot flames
+                if (props.showEmbers && sparks.length < (MAX_SPARKS * qMul) | 0
+                    && Math.random() < (0.12 + heat * 0.3) * intensity) {
+                    const n = 1 + (Math.random() * 2 | 0);
+                    for (let sN = 0; sN < n; sN++) {
+                        sparks.push({
+                            x: x * cell + cell * 0.5 + jitterX[i],
+                            y: y * cell + cell * 0.5 + jitterY[i],
+                            vx: wxF * 0.6 * props.windStrength + (Math.random() - 0.5) * 2.2,
+                            vy: wyF * 0.6 * props.windStrength - (0.8 + Math.random() * 1.8), // shoot up
+                            life: 0.5 + Math.random() * 0.5,
+                            size: 0.6 + Math.random() * 0.8,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Ash decay + smolder embers + regrowth (single pass over grid)
+    // Succession: ash → bare dirt → grass → tree. Tree saplings strongly favour
+    // ground next to surviving trees (seed fall), so forest grows back from its
+    // edges and burn scars near woodland re-fuel naturally.
+    const regrowGrass    = props.regrowth ? 0.00016 * props.regrowthRate : 0;
+    const regrowTreeBase = props.regrowth ? 0.00016 * props.regrowthRate : 0;
+    for (let i = 0; i < grid.length; i++) {
+        const s = grid[i];
+        if (s === ASH_GRASS || s === ASH_TREE) {
+            burnTimer[i] -= 1;
+            // hot smouldering ash → cold charred earth (a lingering burn scar)
+            if (burnTimer[i] <= 0) {
+                grid[i] = CHARRED;
+                burnTimer[i] = 1500 + Math.random() * 2400;   // scar lingers a while
+                markStaticDirty();
+                continue;
+            }
+            // Smoulder: fresh ash occasionally pops a tiny ember
+            if (props.showEmbers && burnTimer[i] > 120
+                && embers.length < (MAX_EMBERS * qMul) | 0 && Math.random() < 0.02) {
+                const y = (i / cols) | 0;
+                const x = i - y * cols;
+                embers.push({
+                    x: x * cell + cell * 0.5 + jitterX[i] + (Math.random() - 0.5) * cell * 0.3,
+                    y: y * cell + cell * 0.5 + jitterY[i] + (Math.random() - 0.5) * cell * 0.3,
+                    vx: wxF * 0.25 * props.windStrength + (Math.random() - 0.5) * 0.3,
+                    vy: wyF * 0.25 * props.windStrength + (Math.random() - 0.5) * 0.3,
+                    life: 0.35 + Math.random() * 0.30,
+                    size: 0.7 + Math.random() * 0.5,
+                    phase: Math.random() * 6.28,
+                });
+            }
+        } else if (s === CHARRED) {
+            // The scar slowly cools and heals back to bare earth, then regrows.
+            burnTimer[i] -= 1;
+            if (burnTimer[i] <= 0) { grid[i] = DIRT; terrainRestoreDirt(i); }
+        } else if (s === DIRT && regrowGrass > 0) {
+            if (Math.random() < regrowGrass) {
+                grid[i] = GRASS;
+                grassVar[i] = pickGrassVariant();
+                terrainDrawGrass(i); // incremental: stamp the new tuft onto terrain
+            }
+        } else if (s === GRASS && regrowTreeBase > 0) {
+            // Cheap pre-roll, then a neighbour check decides if a sapling takes.
+            if (Math.random() < regrowTreeBase) {
+                const y = (i / cols) | 0, x = i - y * cols;
+                let treeNeighbors = 0;
+                for (let d = 0; d < NEIGHBOURS.length; d++) {
+                    const nx = x + NEIGHBOURS[d][0];
+                    const ny = y + NEIGHBOURS[d][1];
+                    if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+                    const ns = grid[idx(nx, ny)];
+                    if (ns === TREE || ns === BURN_TREE) treeNeighbors++;
+                }
+                // Near woodland: saplings take readily. Out in the open: rarely.
+                const take = treeNeighbors > 0 ? 0.80 : 0.06;
+                if (Math.random() < take) {
+                    grid[i] = TREE;
+                    treeVar[i] = pickTreeVariant();
+                    treeGrowth[i] = 0.12 + Math.random() * 0.08; // starts as a sapling
+                    // grass tuft already baked under the new tree — no terrain edit needed
+                }
+            }
+        } else if (s === TREE && treeGrowth[i] < 1) {
+            // Saplings mature into full trees over ~1–2 minutes
+            treeGrowth[i] = Math.min(1, treeGrowth[i] + 0.00045 * Math.max(0.4, props.regrowthRate));
+        }
+    }
+
+    // Wind gusts — occasional burst that shifts angle and boosts speed briefly
+    if (props.windGusts) {
+        nextGustAt--;
+        if (nextGustAt <= 0 && gustTimer <= 0) {
+            // Stormier weather makes gusts more frequent and stronger
+            const storm = (weatherCurrent >= WEATHER_MONSOON) ? 1 : 0;
+            gustStrength = 0.7 + Math.random() * (0.9 + storm * 0.6);
+            gustTimer    = 45 + (Math.random() * 60) | 0;
+            windAngle   += (Math.random() - 0.5) * (0.6 + storm * 0.4);
+            nextGustAt   = (500 + Math.random() * 900) | 0;
+        }
+        if (gustTimer > 0) {
+            gustTimer--;
+            gustStrength *= 0.985;
+        } else {
+            gustStrength = 0;
+        }
+    }
+
+    // Periodically resync glowing-mushroom spots (handles burn/regrowth changes)
+    if (--glowRefreshAt <= 0) refreshGlowSpots();
+
+    // Fish glide in the water
+    updateFish();
+
+    // Weather + lightning bolts (+ persistent strike afterglow)
+    updateWeather();
+    updateClouds();
+    updateRain();
+    updateLightning();
+    updateLightningGlows();
+
+    // Decay RGB vignette pulse
+    if (rgbVignettePulse > 0) rgbVignettePulse = Math.max(0, rgbVignettePulse - 0.02);
+
+    // Bird flocks — spawn rarely, drift across (skip in storms)
+    // Birds keep clear of heavy weather (monsoon / storm)
+    if (props.showBirds && weatherCurrent < WEATHER_MONSOON
+        && birds.length < (60 * qMul) | 0 && Math.random() < 0.0008) spawnBirdFlock();
+    if (birds.length) {
+        const minX = -60, maxX = worldPxW + 60;
+        const minY = -60, maxY = worldPxH + 60;
+        // Pre-compute the fire centroid (steer-away anchor) once per tick
+        let fcx = 0, fcy = 0, fcn = 0;
+        if (burningCount > 0) {
+            // Cheap sample: scan ~120 grid positions, accumulate centers of burning cells
+            const step = Math.max(1, (grid.length / 120) | 0);
+            for (let i = 0; i < grid.length; i += step) {
+                if (grid[i] === BURN_TREE || grid[i] === BURN_GRASS) {
+                    const yc = (i / cols) | 0;
+                    const xc = i - yc * cols;
+                    fcx += xc * cell + cell * 0.5;
+                    fcy += yc * cell + cell * 0.5;
+                    fcn++;
+                }
+            }
+            if (fcn > 0) { fcx /= fcn; fcy /= fcn; }
+        }
+        let writeI = 0;
+        for (let i = 0; i < birds.length; i++) {
+            const b = birds[i];
+            // Steer away from fire centroid when nearby
+            if (fcn > 0) {
+                const dx = b.x - fcx, dy = b.y - fcy;
+                const d2 = dx * dx + dy * dy;
+                const reach = 160 + Math.min(120, fcn * 8);
+                if (d2 < reach * reach) {
+                    const d = Math.sqrt(d2) || 1;
+                    const push = (1 - d / reach) * 0.45;
+                    b.vx += (dx / d) * push;
+                    b.vy += (dy / d) * push * 0.5;
+                    // Renormalize speed so they don't accelerate forever
+                    const sp = Math.hypot(b.vx, b.vy);
+                    const targetSp = 1.6;
+                    if (sp > 0) {
+                        b.vx = (b.vx / sp) * targetSp;
+                        b.vy = (b.vy / sp) * targetSp;
+                    }
+                }
+            }
+            b.x += b.vx;
+            b.y += b.vy;
+            b.flap += b.flapSpd;
+            if (b.x > minX && b.x < maxX && b.y > minY && b.y < maxY) {
+                birds[writeI++] = b;
+            }
+        }
+        birds.length = writeI;
+    }
+
+    // Fireflies — slowly populate up to a target count, drift gently with phase glow
+    const TARGET_FIREFLIES = props.showFireflies ? ((40 * qMul) | 0) : 0;
+    if (fireflies.length < TARGET_FIREFLIES && Math.random() < 0.05) spawnFirefly();
+    if (!props.showFireflies && fireflies.length) fireflies = [];
+    if (fireflies.length) {
+        for (const f of fireflies) {
+            f.x += f.vx;
+            f.y += f.vy;
+            f.vx += (Math.random() - 0.5) * 0.06;
+            f.vy += (Math.random() - 0.5) * 0.06;
+            f.vx *= 0.96;
+            f.vy *= 0.96;
+            f.phase += f.phaseSpd;
+            // Wrap edges
+            if (f.x < -10) f.x = worldPxW + 10;
+            if (f.x > worldPxW + 10) f.x = -10;
+            if (f.y < -10) f.y = worldPxH + 10;
+            if (f.y > worldPxH + 10) f.y = -10;
+        }
+    }
+
+    // Ambient leaves drifting in wind (independent of fire)
+    if (props.showLeaves && props.showWindParticles && props.windStrength > 0.05) {
+        const spawnRate = 0.25 * Math.min(1, props.windStrength);
+        if (leaves.length < (MAX_LEAVES * qMul) | 0 && Math.random() < spawnRate) spawnLeaf();
+        const wxL = wxF * 0.05 * props.windStrength;
+        const wyL = wyF * 0.05 * props.windStrength;
+        const minX = -25, maxX = worldPxW + 25;
+        const minY = -25, maxY = worldPxH + 25;
+        let writeI = 0;
+        for (let i = 0; i < leaves.length; i++) {
+            const p = leaves[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vx = p.vx * 0.985 + wxL + (Math.random() - 0.5) * 0.12;
+            p.vy = p.vy * 0.985 + wyL + (Math.random() - 0.5) * 0.12;
+            p.rot += p.rotSpd;
+            p.life -= 0.0022;
+            if (p.life > 0 && p.x > minX && p.x < maxX && p.y > minY && p.y < maxY) {
+                leaves[writeI++] = p;
+            }
+        }
+        leaves.length = writeI;
+    } else if (leaves.length) {
+        leaves.length = 0;
+    }
+
+    // Smoke physics (in-place compaction — no per-frame allocation)
+    if (smokeParticles.length) {
+        const wxA = wxF * 0.10 * props.windStrength;
+        const wyA = wyF * 0.10 * props.windStrength;
+        let writeI = 0;
+        for (let i = 0; i < smokeParticles.length; i++) {
+            const p = smokeParticles[i];
+            p.x += p.vx + wxA;
+            p.y += p.vy + wyA;
+            p.vx *= 0.985;
+            p.vy *= 0.985;
+            p.size += p.grow;
+            p.life -= 0.0075;
+            if (p.life > 0) smokeParticles[writeI++] = p;
+        }
+        smokeParticles.length = writeI;
+    }
+
+    // Flame plume physics (in-place compaction)
+    if (flamePlumes.length) {
+        const wxA = wxF * 0.06 * props.windStrength;
+        const wyA = wyF * 0.06 * props.windStrength;
+        let writeI = 0;
+        for (let i = 0; i < flamePlumes.length; i++) {
+            const p = flamePlumes[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vx = p.vx * 0.93 + wxA;
+            p.vy = p.vy * 0.93 + wyA;
+            p.size *= 1.038;
+            p.life -= 0.043;
+            p.phase += 1;
+            if (p.life > 0) flamePlumes[writeI++] = p;
+        }
+        flamePlumes.length = writeI;
+    }
+
+    // Spark physics — shoot up, slow, arc back down a touch, flicker out fast
+    if (sparks.length) {
+        let writeI = 0;
+        for (let i = 0; i < sparks.length; i++) {
+            const p = sparks[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vy += 0.07;          // gravity arcs them back down
+            p.vx *= 0.96;
+            p.life -= 0.028;
+            if (p.life > 0) sparks[writeI++] = p;
+        }
+        sparks.length = writeI;
+    }
+
+    // Ember physics (in-place compaction; can ignite cells they land on)
+    if (embers.length) {
+        const wxA = wxF * 0.08 * props.windStrength;
+        const wyA = wyF * 0.08 * props.windStrength;
+        const igniteChance = 0.00028 * props.spreadRate;  // rarer spot-fires (lush forest)
+        let writeI = 0;
+        for (let i = 0; i < embers.length; i++) {
+            const p = embers[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vx = p.vx * 0.94 + wxA;
+            p.vy = p.vy * 0.94 + wyA;
+            p.life -= 0.022;
+            if (p.life > 0) {
+                if (Math.random() < igniteChance) {
+                    const cx = (p.x / cell) | 0;
+                    const cy = (p.y / cell) | 0;
+                    if (cx >= 0 && cx < cols && cy >= 0 && cy < rows) {
+                        igniteCell(idx(cx, cy));
+                    }
+                }
+                embers[writeI++] = p;
+            }
+        }
+        embers.length = writeI;
+    }
+
+    // Wind streaks (subtle ground-level dust trails in wind direction)
+    if (props.showWindParticles && props.windStrength > 0.05) {
+        if (windStreaks.length < (MAX_WIND_PARTS * qMul) | 0 && Math.random() < 0.5) {
+            const w = worldPxW, h = worldPxH;
+            let x, y;
+            if (Math.abs(wxF) > Math.abs(wyF)) {
+                x = wxF > 0 ? -10 : w + 10;
+                y = Math.random() * h;
+            } else {
+                y = wyF > 0 ? -10 : h + 10;
+                x = Math.random() * w;
+            }
+            windStreaks.push({
+                x, y,
+                len: 10 + Math.random() * 24,
+                life: 1.0,
+                speed: 1.0 + Math.random() * 1.8,
+            });
+        }
+        const minX = -60, maxX = worldPxW + 60;
+        const minY = -60, maxY = worldPxH + 60;
+        let writeI = 0;
+        for (let i = 0; i < windStreaks.length; i++) {
+            const p = windStreaks[i];
+            p.x += wxF * p.speed * props.windStrength;
+            p.y += wyF * p.speed * props.windStrength;
+            p.life -= 0.005;
+            if (p.life > 0 && p.x > minX && p.x < maxX && p.y > minY && p.y < maxY) {
+                windStreaks[writeI++] = p;
+            }
+        }
+        windStreaks.length = writeI;
+    } else if (windStreaks.length) {
+        windStreaks.length = 0;
+    }
+}
+
+// ============================================================
+// Static-layer cache (water/paths/grass/rocks/ash baked together)
+// ============================================================
+function markStaticDirty() { staticDirty = true; }
+function markTerrainDirty() { terrainDirty = true; staticDirty = true; }
+
+// Incremental terrain edits — update a single cell on the baked terrain canvas
+// instead of re-baking the whole thing (which includes the costly water blur).
+// Used by regrowth so the forest can recover without per-event rebake hitches.
+function terrainDrawGrass(i) {
+    if (!terrainCanvas) { markTerrainDirty(); return; }
+    const cell = Math.max(2, props.cellSize | 0);
+    const y = (i / cols) | 0, x = i - y * cols;
+    terrainCtx.drawImage(grassSprites, grassVar[i] * grassSpW, 0, grassSpW, grassSpH,
+                         x * cell, y * cell, grassSpW, grassSpH);
+    markStaticDirty();
+}
+function terrainRestoreDirt(i) {
+    if (!terrainCanvas) { markTerrainDirty(); return; }
+    const cell = Math.max(2, props.cellSize | 0);
+    const y = (i / cols) | 0, x = i - y * cols;
+    // Repaint the bare dirt background for this one cell (clears baked grass)
+    terrainCtx.drawImage(bgCanvas, x * cell, y * cell, cell, cell,
+                         x * cell, y * cell, cell, cell);
+    markStaticDirty();
+}
+
+// Bake the worldgen-static terrain (dirt + water + paths + lily pads + rocks).
+// None of this changes when cells burn/regrow, so it's baked once per world —
+// keeping the expensive blurred-water passes out of the per-frame static rebuild.
+function bakeTerrain() {
+    if (!terrainCanvas) {
+        terrainCanvas = document.createElement("canvas");
+        terrainCtx    = terrainCanvas.getContext("2d");
+    }
+    if (terrainCanvas.width !== worldPxW || terrainCanvas.height !== worldPxH) {
+        terrainCanvas.width  = worldPxW;
+        terrainCanvas.height = worldPxH;
+    }
+    const sc = terrainCtx;
+    const w = terrainCanvas.width;
+    const h = terrainCanvas.height;
+    const cell = Math.max(2, props.cellSize | 0);
+
+    sc.clearRect(0, 0, w, h);
+    sc.drawImage(bgCanvas, 0, 0);
+
+    // ---- Water (baked) ----
+    // Smooth shorelines: uniform colors per layer so overlapping discs MERGE
+    // seamlessly (no scalloped ring artifacts from per-disc color or alpha).
+    //
+    // Layer order at a shoreline cell, outer→inner:
+    //   shallow teal rim  →  deep blue body (interior)
+    const WATER_DEEP    = "#2a5e96";   // deep body
+    const WATER_SHALLOW = "#5aa6c8";   // lighter near shore
+    const WATER_DEEP_REFLECT = "#2f6e72"; // greenish deep where trees overhang
+
+    // Smooth water via an offscreen blurred mask — eliminates per-cell disc
+    // scalloping. Build a binary water-cell rect mask, blur it, and composite
+    // layers from larger (shore) to smaller (deep) so the shoreline is even.
+    if (!waterMask) {
+        waterMask = document.createElement("canvas");
+        waterMaskCtx = waterMask.getContext("2d");
+    }
+    if (waterMask.width !== w || waterMask.height !== h) {
+        waterMask.width = w; waterMask.height = h;
+    }
+    const mc = waterMaskCtx;
+    const blurPx = Math.max(1, (cell * 0.42) | 0);
+
+    // Reusable: fill a set of cells (predicate) as overlapping rects on the mask
+    const paintMask = (color, predicate, pad) => {
+        mc.clearRect(0, 0, w, h);
+        mc.fillStyle = color;
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < cols; x++) {
+                const i = y * cols + x;
+                if (grid[i] !== WATER) continue;
+                if (predicate && !predicate(x, y, i)) continue;
+                mc.fillRect(x * cell - pad, y * cell - pad, cell + pad * 2, cell + pad * 2);
+            }
+        }
+    };
+
+    // 1) Shallow halo — all water cells, blurred → smooth soft outer shape
+    paintMask(WATER_SHALLOW, null, 1);
+    sc.save();
+    sc.filter = `blur(${blurPx}px)`;
+    sc.drawImage(waterMask, 0, 0);
+    // draw twice to firm up opacity (blur thins it out)
+    sc.drawImage(waterMask, 0, 0);
+    sc.restore();
+
+    // 2) Deep body — interior cells only (erode by 1), blurred → soft deep,
+    //    leaving an even shallow rim at the shore
+    const isInterior = (x, y) => {
+        for (let d = 0; d < NEIGHBOURS.length; d++) {
+            const nx = x + NEIGHBOURS[d][0];
+            const ny = y + NEIGHBOURS[d][1];
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) return false;
+            if (grid[idx(nx, ny)] !== WATER) return false;
+        }
+        return true;
+    };
+    paintMask(WATER_DEEP, isInterior, 1);
+    sc.save();
+    sc.filter = `blur(${blurPx}px)`;
+    sc.drawImage(waterMask, 0, 0);
+    sc.drawImage(waterMask, 0, 0);
+    sc.restore();
+
+    // 3) Greenish reflection where trees overhang — interior reflect cells, blurred
+    paintMask(WATER_DEEP_REFLECT, (x, y, i) => isInterior(x, y) && (waterPhase[i] & 0x10), 1);
+    sc.save();
+    sc.filter = `blur(${blurPx}px)`;
+    sc.globalAlpha = 0.85;
+    sc.drawImage(waterMask, 0, 0);
+    sc.restore();
+    // 4) Lily pads
+    for (let y = 0; y < rows; y++) {
+        const rowBase = y * cols;
+        for (let x = 0; x < cols; x++) {
+            const i = rowBase + x;
+            if (grid[i] !== WATER || !(waterPhase[i] & 0x40)) continue;
+            const cxP = x * cell + cell * 0.5;
+            const cyP = y * cell + cell * 0.5;
+            const padR = cell * 0.36;
+            sc.fillStyle = "rgba(0,30,40,0.40)";
+            sc.beginPath(); sc.arc(cxP + 0.6, cyP + 0.8, padR, 0, Math.PI * 2); sc.fill();
+            sc.fillStyle = "rgb(36,80,32)";
+            sc.beginPath(); sc.arc(cxP, cyP, padR, 0, Math.PI * 2); sc.fill();
+            sc.fillStyle = "rgb(62,118,48)";
+            sc.beginPath(); sc.arc(cxP - padR * 0.15, cyP - padR * 0.15, padR * 0.72, 0, Math.PI * 2); sc.fill();
+            sc.fillStyle = "rgb(28,72,108)";
+            sc.beginPath();
+            sc.moveTo(cxP, cyP);
+            sc.lineTo(cxP + padR * 1.05, cyP - padR * 0.10);
+            sc.lineTo(cxP + padR * 1.05, cyP + padR * 0.10);
+            sc.closePath();
+            sc.fill();
+            if (waterPhase[i] & 0x20) {
+                sc.fillStyle = "rgba(255,228,232,0.95)";
+                sc.beginPath(); sc.arc(cxP - padR * 0.18, cyP - padR * 0.18, padR * 0.30, 0, Math.PI * 2); sc.fill();
+                sc.fillStyle = "rgba(255,240,120,0.95)";
+                sc.beginPath(); sc.arc(cxP - padR * 0.18, cyP - padR * 0.18, padR * 0.12, 0, Math.PI * 2); sc.fill();
+            }
+        }
+    }
+    // 5) Dirt paths — soft, blurred worn-earth trails that melt into the ground
+    //    (no hard grid tiles). Painted as overlapping discs on the mask, blurred,
+    //    and composited at low opacity so it reads as packed earth, not a road.
+    {
+        let anyPath = false;
+        mc.clearRect(0, 0, w, h);
+        mc.fillStyle = "#7a5c39"; // packed sandy earth — clearly lighter than dirt
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < cols; x++) {
+                const i = y * cols + x;
+                if (grid[i] !== DIRT || !(waterPhase[i] & 0x80)) continue;
+                anyPath = true;
+                const cxP = x * cell + cell * 0.5;
+                const cyP = y * cell + cell * 0.5;
+                mc.beginPath();
+                mc.arc(cxP, cyP, cell * 0.82, 0, Math.PI * 2);
+                mc.fill();
+            }
+        }
+        if (anyPath) {
+            // Lighter blur than water — paths are thin trails, so a big blur would
+            // wash the colour out. Keep edges soft but the trail clearly visible.
+            const pathBlur = Math.max(1, (cell * 0.22) | 0);
+            sc.save();
+            sc.filter = `blur(${pathBlur}px)`;
+            sc.globalAlpha = 0.7;
+            sc.drawImage(waterMask, 0, 0);
+            sc.drawImage(waterMask, 0, 0); // second draw firms up the colour
+            sc.restore();
+        }
+    }
+
+    // ---- Rocks (worldgen-static) ----
+    for (let y = 0; y < rows; y++) {
+        const rowBase = y * cols;
+        for (let x = 0; x < cols; x++) {
+            const i = rowBase + x;
+            if (grid[i] !== ROCK) continue;
+            const px = x * cell + jitterX[i] * 0.4;
+            const py = y * cell + jitterY[i] * 0.4;
+            sc.drawImage(rockSprites, rockVar[i] * rockSpW, 0, rockSpW, rockSpH,
+                         px, py, rockSpW, rockSpH);
+        }
+    }
+
+    // ---- Grass tufts (rarely change; baked here so the per-fire static
+    //      rebuild stays cheap). Drawn under grass / tree / burning-tree cells.
+    //      A burned cell keeps its grass baked underneath — the ash patch is
+    //      drawn over it in the static layer, so it's hidden until ash→dirt
+    //      (which marks terrain dirty to clear the stale grass).
+    for (let y = 0; y < rows; y++) {
+        const rowBase = y * cols;
+        for (let x = 0; x < cols; x++) {
+            const i = rowBase + x;
+            const s = grid[i];
+            if (s !== GRASS && s !== TREE && s !== BURN_GRASS && s !== BURN_TREE) continue;
+            sc.drawImage(grassSprites, grassVar[i] * grassSpW, 0, grassSpW, grassSpH,
+                         x * cell, y * cell, grassSpW, grassSpH);
+        }
+    }
+
+    terrainDirty = false;
+}
+
+// Composite the cached terrain with the layers that DO change as cells burn/regrow
+// (grass tufts + ash). Cheap — no blur, just sprite blits.
+function renderStaticLayer() {
+    if (!staticCanvas) {
+        staticCanvas = document.createElement("canvas");
+        staticCtx    = staticCanvas.getContext("2d");
+    }
+    if (staticCanvas.width !== worldPxW || staticCanvas.height !== worldPxH) {
+        staticCanvas.width  = worldPxW;
+        staticCanvas.height = worldPxH;
+    }
+    if (terrainDirty) bakeTerrain();
+
+    const sc = staticCtx;
+    const w = staticCanvas.width;
+    const h = staticCanvas.height;
+    const cell = Math.max(2, props.cellSize | 0);
+
+    sc.clearRect(0, 0, w, h);
+    sc.drawImage(terrainCanvas, 0, 0);
+
+    // ---- Burn states: smouldering ash, then cold charred-earth scars ----
+    for (let y = 0; y < rows; y++) {
+        const rowBase = y * cols;
+        for (let x = 0; x < cols; x++) {
+            const i = rowBase + x;
+            const s = grid[i];
+            const px = x * cell;
+            const py = y * cell;
+            if (s === ASH_GRASS) {
+                sc.fillStyle = "rgba(26,15,9,0.78)";       // warm-black smouldering ash
+                sc.fillRect(px, py, cell, cell);
+            } else if (s === ASH_TREE) {
+                const ax = px + cell * 0.5 + jitterX[i];
+                const ay = py + cell * 0.5 + jitterY[i];
+                sc.fillStyle = "rgba(14,8,5,0.9)";
+                sc.beginPath();
+                sc.arc(ax, ay, cell * 0.52, 0, Math.PI * 2);
+                sc.fill();
+                sc.fillStyle = "rgba(40,24,12,1)";          // charred stump
+                sc.beginPath();
+                sc.arc(ax, ay, Math.max(1, cell * 0.13), 0, Math.PI * 2);
+                sc.fill();
+            } else if (s === CHARRED) {
+                // Cold blackened scorched earth — opaque (covers the green beneath),
+                // with deterministic charcoal mottle + cracks + sparse pale ash.
+                const seed = (i * 2654435761) >>> 0;
+                sc.fillStyle = "#15110e";
+                sc.fillRect(px, py, cell, cell);
+                sc.fillStyle = "rgba(46,40,35,0.55)";       // charcoal lump
+                sc.fillRect(px + (seed % (cell || 1)), py + ((seed >> 4) % (cell || 1)),
+                            Math.max(1, (cell * 0.34) | 0), Math.max(1, (cell * 0.34) | 0));
+                sc.fillStyle = "rgba(6,4,3,0.85)";          // crack
+                sc.fillRect(px + ((seed >> 8) % (cell || 1)), py, 1, cell);
+                if ((seed & 3) === 0) {                      // pale ash fleck
+                    sc.fillStyle = "rgba(135,125,114,0.55)";
+                    sc.fillRect(px + ((seed >> 11) % (cell || 1)), py + ((seed >> 14) % (cell || 1)), 1, 1);
+                }
+            }
+        }
+    }
+
+    staticDirty = false;
+    staticThrottle = STATIC_REBUILD_MIN_GAP;
+}
+
+// ============================================================
+// Render
+// ============================================================
+function updateCamera() {
+    const maxX = Math.max(0, worldPxW - canvas.width);
+    const maxY = Math.max(0, worldPxH - canvas.height);
+    if (props.mousePan && mouseInside && (maxX > 0 || maxY > 0)) {
+        // View slews toward the mouse: off-centre mouse → pan that way.
+        const cxs = canvas.width * 0.5, cys = canvas.height * 0.5;
+        let nx = (mouseX - cxs) / cxs;
+        let ny = (mouseY - cys) / cys;
+        const dead = 0.12;                      // small dead-zone near centre
+        if (Math.abs(nx) < dead) nx = 0;
+        if (Math.abs(ny) < dead) ny = 0;
+        const sp = 3.2 * props.panSpeed;
+        camX += nx * sp;
+        camY += ny * sp;
+    } else if (!props.mousePan) {
+        // Ease toward the manual pan position
+        camX += (props.panX * maxX - camX) * 0.08;
+        camY += (props.panY * maxY - camY) * 0.08;
+    }
+    camX = Math.max(0, Math.min(maxX, camX));
+    camY = Math.max(0, Math.min(maxY, camY));
+}
+
+// Blit only the visible window of a world-sized cached canvas (drawn in world
+// coords, under the camera translate) — avoids processing the whole big canvas.
+function drawWorldLayer(src, cx, cy, vw, vh) {
+    cx = cx | 0; cy = cy | 0;
+    const sw = Math.min(vw, src.width - cx);
+    const sh = Math.min(vh, src.height - cy);
+    if (sw > 0 && sh > 0) ctx.drawImage(src, cx, cy, sw, sh, cx, cy, sw, sh);
+}
+
+function render() {
+    const w = canvas.width;
+    const h = canvas.height;
+    const cell = Math.max(2, props.cellSize | 0);
+
+    updateCamera();
+
+    // Background: cached static layer (dirt + water + paths + grass + rocks + ash)
+    if (staticDirty && staticThrottle <= 0) renderStaticLayer();
+    if (staticThrottle > 0) staticThrottle--;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    // Shift into world space for the camera; world layers draw at world coords and
+    // only the visible window lands on screen.
+    ctx.translate(-camX, -camY);
+    // Blit only the visible region of the (large) world ground canvas — cheap.
+    drawWorldLayer(staticCanvas, camX, camY, w, h);
+
+    // Cheap water sparkles + ripple bands (animated on top of baked water)
+    {
+        const n = grid.length;
+        // Wave-band animation: dim a sine band that travels across the canvas
+        const bandPhase = (frame * 0.012) % (Math.PI * 2);
+        // Sample ~36 random cells per frame for sparkles
+        for (let k = 0; k < 36; k++) {
+            const i = (Math.random() * n) | 0;
+            if (grid[i] !== WATER) continue;
+            const y = (i / cols) | 0;
+            const x = i - y * cols;
+            const sx = x * cell + ((Math.random() * cell) | 0);
+            const sy = y * cell + ((Math.random() * cell) | 0);
+            // Brighter sparkle where sine band peaks
+            const phase = (sx * 0.018 + sy * 0.013 + bandPhase);
+            const b = Math.sin(phase) * 0.5 + 0.5; // 0..1
+            const alpha = (0.30 + b * 0.55).toFixed(2);
+            ctx.fillStyle = `rgba(240,250,255,${alpha})`;
+            ctx.fillRect(sx, sy, 1, 1);
+        }
+    }
+
+    // Fish — dark shadows gliding just under the water surface
+    if (props.showFish && fishList.length) {
+        ctx.fillStyle = "rgba(8,24,32,0.42)";
+        for (const f of fishList) {
+            const wag = Math.sin(f.wob) * 0.4 * f.size;
+            ctx.save();
+            ctx.translate(f.x, f.y);
+            ctx.rotate(f.ang);
+            ctx.beginPath();                                   // body
+            ctx.ellipse(0, 0, f.size, f.size * 0.42, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();                                   // wagging tail
+            ctx.moveTo(-f.size * 0.85, 0);
+            ctx.lineTo(-f.size * 1.5, -f.size * 0.45 + wag);
+            ctx.lineTo(-f.size * 1.5,  f.size * 0.45 + wag);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    // Wind streaks (slightly above ground level — warm dust tint)
+    if (props.showWindParticles && windStreaks.length) {
+        const wxF = Math.cos(windAngle);
+        const wyF = Math.sin(windAngle);
+        ctx.lineWidth = 1.3;
+        for (const p of windStreaks) {
+            const a = p.life * 0.30;
+            ctx.strokeStyle = `rgba(240,215,185,${a.toFixed(3)})`;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(p.x - wxF * p.len, p.y - wyF * p.len);
+            ctx.stroke();
+        }
+    }
+
+    // Per-frame smoulder glow on hot ash (fades as the ash cools toward charred)
+    for (let y = 0; y < rows; y++) {
+        const rowBase = y * cols;
+        for (let x = 0; x < cols; x++) {
+            const i = rowBase + x;
+            const s = grid[i];
+            if (s !== ASH_TREE && s !== ASH_GRASS) continue;
+            const heat = Math.min(1, burnTimer[i] / 350);   // hottest right after burning
+            if (heat <= 0.05) continue;
+            if (Math.random() < 0.5) {
+                const ax = x * cell + cell * 0.5 + jitterX[i];
+                const ay = y * cell + cell * 0.5 + jitterY[i];
+                ctx.fillStyle = `rgba(255,90,25,${(heat * 0.6).toFixed(2)})`;
+                ctx.beginPath();
+                ctx.arc(ax, ay, Math.max(1, cell * 0.16), 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+
+    // Glowing-mushroom halos — soft cyan pulse at ground level (below trees, so a
+    // canopy occludes one beneath it). Brighter when the scene is dark/wet.
+    if (glowSpots.length) {
+        const moodBoost = 1 + weatherIntensitySmooth * 0.4; // pops a little in storm gloom
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        for (const s of glowSpots) {
+            const pulse = 0.55 + Math.sin(frame * 0.05 + s.phase) * 0.45;
+            const a = pulse * 0.24 * moodBoost;          // much subtler than before
+            const rr = s.r * 0.7;                          // smaller halo
+            const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, rr);
+            grad.addColorStop(0,   `rgba(120,230,215,${(a).toFixed(3)})`);
+            grad.addColorStop(0.5, `rgba(60,190,185,${(a * 0.4).toFixed(3)})`);
+            grad.addColorStop(1,   "rgba(40,160,170,0)");
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, rr, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // Cloud shadows — soft dark patches on the ground (below trees)
+    if (props.showClouds && clouds.length) {
+        ctx.save();
+        ctx.globalCompositeOperation = "multiply";
+        for (const c of clouds) {
+            // Radial gradient shadow
+            const grad = ctx.createRadialGradient(c.x, c.y, c.size * 0.20, c.x, c.y, c.size);
+            const a = c.opacity.toFixed(3);
+            grad.addColorStop(0, `rgba(40,40,55,${a})`);
+            grad.addColorStop(1, "rgba(80,80,95,0)");
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, c.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // PASS 3 — side-view trees, drawn into a cached layer (rebuilt every few
+    // frames) then blitted. Rows go top→bottom so nearer trees overlap the ones
+    // behind (depth); each sprite's BASE anchors near the cell's lower-centre and
+    // the canopy rises up; growth × treeScale sizes each tree.
+    if (!treeLayerCanvas) {
+        treeLayerCanvas = document.createElement("canvas");
+        treeLayerCtx    = treeLayerCanvas.getContext("2d");
+    }
+    if (treeLayerCanvas.width !== worldPxW || treeLayerCanvas.height !== worldPxH) {
+        treeLayerCanvas.width = worldPxW; treeLayerCanvas.height = worldPxH;
+        treeLayerCountdown = 0;
+    }
+    if (treeLayerCountdown <= 0) {
+        const tlc = treeLayerCtx;
+        tlc.clearRect(0, 0, worldPxW, worldPxH);
+        const swayScale = Math.min(1.4, props.windStrength) * cell * 0.10;
+        const swayWxF = Math.cos(windAngle);
+        const swayT = frame * 0.05;
+        const ts = props.treeScale;
+        for (let y = 0; y < rows; y++) {
+            const rowBase = y * cols;
+            for (let x = 0; x < cols; x++) {
+                const i = rowBase + x;
+                const s = grid[i];
+                if (s !== TREE && s !== BURN_TREE) continue;
+                const phase = swayT + (treeVar[i] * 0.4) + ((i & 31) * 0.21);
+                const swX = swayWxF * Math.sin(phase) * swayScale;
+                const g = treeGrowth[i] || 1;
+                const scale = (0.30 + g * 0.70) * ts;
+                const dw = treeSpW * scale;
+                const dh = treeSpH * scale;
+                const baseX = x * cell + cell * 0.5 + jitterX[i] * 0.7 + swX;
+                const baseY = y * cell + cell * 0.92 + jitterY[i] * 0.4;
+                tlc.drawImage(treeSprites, treeVar[i] * treeSpW, 0, treeSpW, treeSpH,
+                              baseX - dw * 0.5, baseY - dh, dw, dh);
+            }
+        }
+        treeLayerCountdown = TREE_LAYER_GAP;
+    }
+    treeLayerCountdown--;
+    drawWorldLayer(treeLayerCanvas, camX, camY, w, h);
+
+    // Lightning afterglow (under fire, on top of trees)
+    drawLightningGlows();
+
+    // --- Fire glow pass ---
+    // Track the fire's pixel bounding box for the heat-shimmer pass.
+    let fbX0 = 1e9, fbY0 = 1e9, fbX1 = -1e9, fbY1 = -1e9;
+    if (burningCount > 0) {
+        glowCtx.clearRect(0, 0, worldPxW, worldPxH);
+        for (let y = 0; y < rows; y++) {
+            const rowBase = y * cols;
+            for (let x = 0; x < cols; x++) {
+                const i = rowBase + x;
+                const s = grid[i];
+                if (s !== BURN_GRASS && s !== BURN_TREE) continue;
+                const isTree = s === BURN_TREE;
+                const pxL = x * cell, pxT = y * cell;
+                if (pxL < fbX0) fbX0 = pxL; if (pxL > fbX1) fbX1 = pxL;
+                if (pxT < fbY0) fbY0 = pxT; if (pxT > fbY1) fbY1 = pxT;
+
+                // Lifecycle intensity (small smolder → big blaze → die) + clustering heat
+                const age = burnMax[i] > 0 ? (1 - burnTimer[i] / burnMax[i]) : 0;
+                const intensity = burnIntensity(age);
+                const heat = fireHeat[i];          // 0..1 from burning neighbours
+                // White-hot reserved mostly for dense clusters; a lone flame stays orange/yellow
+                const hot = Math.min(1, intensity * 0.30 + heat * 0.95);
+
+                const flicker = 0.75 + Math.random() * 0.5;
+                // Flame radius grows with intensity; a clustered blaze flares larger
+                const baseR = (isTree ? cell * 0.80 : cell * 0.46);
+                // Lower size floor so a young smoldering cell is a tiny flame,
+                // growing to full size as intensity climbs.
+                const flameR = baseR * (0.12 + intensity * 1.02) * (1 + heat * 0.5) * flicker;
+                const jx = isTree ? jitterX[i] : 0;
+                const jy = isTree ? jitterY[i] : 0;
+                const cxP = x * cell + cell * 0.5 + jx + (Math.random() - 0.5) * cell * 0.20;
+                const cyP = y * cell + cell * 0.5 + jy + (Math.random() - 0.5) * cell * 0.20;
+
+                // Magic-fire cells get a matching coloured underglow
+                let mGlow = 0;
+                if (props.magicFire > 0) {
+                    const bx = (x / 6) | 0, by = (y / 6) | 0;
+                    const bh = (((bx * 73856093) ^ (by * 19349663)) >>> 0) / 4294967295;
+                    if (bh < props.magicFire) mGlow = 1 + ((bx * 3 + by * 5) % MAGIC_FIRE.length);
+                }
+
+                if (mGlow) {
+                    const mc = MAGIC_FIRE[mGlow - 1];
+                    glowCtx.fillStyle = `rgba(${mc[0]},${mc[1]},${mc[2]},${(0.5 + intensity * 0.3).toFixed(2)})`;
+                    glowCtx.beginPath();
+                    glowCtx.arc(cxP, cyP, flameR, 0, Math.PI * 2);
+                    glowCtx.fill();
+                    // lighter inner
+                    glowCtx.fillStyle = `rgba(${(mc[0]+90>255?255:mc[0]+90)},${(mc[1]+60>255?255:mc[1]+60)},${(mc[2]+60>255?255:mc[2]+60)},${(0.4 + intensity*0.35).toFixed(2)})`;
+                    glowCtx.beginPath();
+                    glowCtx.arc(cxP, cyP, flameR * 0.5, 0, Math.PI * 2);
+                    glowCtx.fill();
+                } else {
+                    // Outer flame — dark ember-red when smoldering, orange at blaze
+                    const oG = (60 + intensity * 130 + heat * 40) | 0;
+                    const oB = (10 + hot * 70) | 0;
+                    glowCtx.fillStyle = `rgba(255,${oG},${oB},${(0.55 + intensity * 0.30).toFixed(2)})`;
+                    glowCtx.beginPath();
+                    glowCtx.arc(cxP, cyP, flameR, 0, Math.PI * 2);
+                    glowCtx.fill();
+
+                    // Inner core — warm amber
+                    const iG = (150 + hot * 70) | 0;
+                    const iB = (45 + hot * 90) | 0;
+                    glowCtx.fillStyle = `rgba(255,${iG},${iB},${(0.40 + intensity * 0.35).toFixed(2)})`;
+                    glowCtx.beginPath();
+                    glowCtx.arc(cxP, cyP, flameR * 0.5, 0, Math.PI * 2);
+                    glowCtx.fill();
+                }
+            }
+        }
+
+        // Composite only the fire's bounding region (with padding for the blur
+        // spread) so the glow blur cost stays proportional to the fire size, not
+        // the whole (large) world canvas.
+        const gpad = 36;
+        const gx0 = Math.max(0, (fbX0 - gpad) | 0);
+        const gy0 = Math.max(0, (fbY0 - gpad) | 0);
+        const gx1 = Math.min(worldPxW, (fbX1 + cell + gpad) | 0);
+        const gy1 = Math.min(worldPxH, (fbY1 + cell + gpad) | 0);
+        const gw = gx1 - gx0, gh = gy1 - gy0;
+        if (gw > 0 && gh > 0) {
+            if (props.fireGlow > 0) {
+                const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
+                const glowAmt = props.fireGlow * audioBoost;
+                ctx.save();
+                ctx.filter = `blur(${(11 * glowAmt).toFixed(1)}px)`;
+                ctx.globalAlpha = Math.min(1, 0.5 * glowAmt);
+                ctx.globalCompositeOperation = "screen";
+                ctx.drawImage(glowCanvas, gx0, gy0, gw, gh, gx0, gy0, gw, gh);
+                ctx.restore();
+            }
+            // A touch of the sharp glow for the embers/core, kept low
+            ctx.save();
+            ctx.globalAlpha = 0.4;
+            ctx.globalCompositeOperation = "lighter";
+            ctx.drawImage(glowCanvas, gx0, gy0, gw, gh, gx0, gy0, gw, gh);
+            ctx.restore();
+        }
+    }
+
+    // Flame tongues — flickering tapering flames that lick upward, curl and dance.
+    // Each plume is a stack of shrinking discs forming a tongue; the shape varies
+    // by "kind" (standard / tall-wispy / wide-squat / curly) and the tip curls
+    // sideways with wind, so the fire looks alive and varied. Colour ramps deep
+    // red base → orange → yellow → white-hot tip (blue-white at the hottest cores).
+    if (flamePlumes.length) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        const SEGS = 5;
+        const windLean = Math.cos(windAngle) * props.windStrength;
+        for (const p of flamePlumes) {
+            const a = p.life;
+            const hot = p.hot || 0;
+            const kind = p.kind || 0;
+            // per-kind shape: [heightMul, widthMul, taper, curlMul]
+            let hMul = 2.9, wMul = 1.0, taper = 0.74, curlMul = 1.0;
+            if (kind === 1)      { hMul = 3.9; wMul = 0.7; taper = 0.84; curlMul = 1.3; } // tall wispy
+            else if (kind === 2) { hMul = 2.0; wMul = 1.35; taper = 0.6;  curlMul = 0.6; } // wide squat
+            else if (kind === 3) { hMul = 3.1; wMul = 0.9; taper = 0.78; curlMul = 2.2; } // curly licker
+            if (p.flare) { hMul *= 1.5; }
+            const tongueH = p.size * hMul;
+            const flick = 0.72 + 0.28 * Math.sin(p.phase);
+            for (let sgi = 0; sgi < SEGS; sgi++) {
+                const t = sgi / (SEGS - 1);                 // 0 base → 1 tip
+                const segY = p.y - tongueH * t;
+                // dancing waver + a wind-driven curl that grows toward the tip
+                const waver = Math.sin(p.phase * 0.6 + t * 3.4) * p.size * 0.5 * t * curlMul;
+                const curl  = (p.curl + windLean * 0.8) * p.size * t * t * curlMul;
+                const segX = p.x + waver + curl;
+                const segR = Math.max(0.5, p.size * wMul * (1.0 - t * taper));
+                const alpha = a * (0.42 - t * 0.12) * flick;
+                if (alpha <= 0) continue;
+                let r, g, b;
+                let segAlpha = alpha;
+                if (p.mtype) {
+                    // magic flame: stays a saturated hue, only lightening to a
+                    // pastel of its own colour at the tip (never pure white), so
+                    // the colour reads even amid bright normal flames.
+                    const mc = MAGIC_FIRE[p.mtype - 1];
+                    const tt = Math.pow(t, 1.6) * 0.55;
+                    r = (mc[0] + (255 - mc[0]) * tt) | 0;
+                    g = (mc[1] + (255 - mc[1]) * tt) | 0;
+                    b = (mc[2] + (255 - mc[2]) * tt) | 0;
+                    segAlpha = alpha * 1.25;
+                } else {
+                    // normal: red base → orange → yellow → white (blue-white hottest)
+                    r = 255;
+                    g = (50 + t * t * 185 + hot * 25) | 0;
+                    b = (6 + Math.pow(t, 2.6) * 215 + hot * 70) | 0;
+                    if (g > 255) g = 255; if (b > 255) b = 255;
+                }
+                ctx.fillStyle = `rgba(${r},${g},${b},${segAlpha.toFixed(3)})`;
+                ctx.beginPath();
+                ctx.arc(segX, segY, segR, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+        ctx.restore();
+    }
+
+    // Crackling sparks — tiny bright pinpoints that pop off the fire and arc
+    if (sparks.length) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        for (const p of sparks) {
+            const a = Math.min(1, p.life);
+            const tw = 0.55 + 0.45 * Math.sin(frame * 0.9 + p.x);   // fast twinkle
+            ctx.fillStyle = `rgba(255,${(220 + a * 35) | 0},${(140 * a) | 0},${(a * tw).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // Embers — glowing floating motes: a soft warm halo + comet trail + bright,
+    // gently-pulsing core, so they drift like living sparks of light.
+    if (embers.length) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        ctx.lineCap = "round";
+        for (const p of embers) {
+            const a = Math.min(1, p.life);
+            const tw = 0.7 + 0.3 * Math.sin((p.phase || 0) + frame * 0.18); // soft pulse
+            // soft glow halo
+            ctx.fillStyle = `rgba(255,${(130 + a * 70) | 0},${(40 * a) | 0},${(a * 0.16 * tw).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * 3.4, 0, Math.PI * 2);
+            ctx.fill();
+            // comet trail
+            ctx.lineWidth = p.size * 0.9;
+            ctx.strokeStyle = `rgba(255,${(120 + a * 100) | 0},${(20 * a) | 0},${(a * 0.45).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.moveTo(p.x - p.vx * 2.4, p.y - p.vy * 2.4);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            // bright core
+            ctx.fillStyle = `rgba(255,${(225 + a * 30) | 0},${(160 * a) | 0},${(a * tw).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // Heat-shimmer distortion — over (and rising above) a sizable fire, snapshot
+    // the region and redraw it in thin horizontal slices nudged sideways by an
+    // animated sine, so the air above the flames ripples like real heat haze.
+    if (props.heatShimmer && burningCount > 14 && fbX1 >= fbX0
+        && qMul > 0.5 && worldPxW <= canvas.width + 2 && worldPxH <= canvas.height + 2) {
+        // (skipped on Low quality and when the world is larger than the screen,
+        //  i.e. while panning, since it snapshots the screen canvas)
+        const pad = cell * 1.5;
+        let x0 = Math.max(0, (fbX0 - pad) | 0);
+        let x1 = Math.min(w, (fbX1 + cell + pad) | 0);
+        let top = Math.max(0, (fbY0 - cell * 3.5) | 0);          // extend up (heat rises)
+        let bot = Math.min(h, (fbY1 + cell) | 0);
+        // Clamp the shimmer region around the fire centre so a sprawling blaze
+        // doesn't make the snapshot + slice work explode.
+        const MAXW = 420, MAXH = 320;
+        if (x1 - x0 > MAXW) { const cx = (x0 + x1) >> 1; x0 = Math.max(0, cx - MAXW / 2 | 0); x1 = Math.min(w, x0 + MAXW); }
+        if (bot - top > MAXH) { const cy = (top + bot) >> 1; top = Math.max(0, cy - MAXH / 2 | 0); bot = Math.min(h, top + MAXH); }
+        const rw = x1 - x0, rh = bot - top;
+        if (rw > 6 && rh > 6) {
+            if (!hazeCanvas) { hazeCanvas = document.createElement("canvas"); hazeCtx = hazeCanvas.getContext("2d"); }
+            if (hazeCanvas.width < rw || hazeCanvas.height < rh) {
+                hazeCanvas.width = Math.max(hazeCanvas.width, rw);
+                hazeCanvas.height = Math.max(hazeCanvas.height, rh);
+            }
+            hazeCtx.clearRect(0, 0, rw, rh);
+            hazeCtx.drawImage(ctx.canvas, x0, top, rw, rh, 0, 0, rw, rh);
+            const amp = Math.min(1.6, cell * 0.12) * Math.min(1, burningCount / 80);
+            // taller bands when the region is large, so the slice count stays bounded
+            const bandH = rh > 220 ? 4 : 3;
+            for (let yy = 0; yy < rh; yy += bandH) {
+                const ny = top + yy;
+                const rise = 0.35 + 0.65 * (1 - yy / rh);
+                const dx = Math.sin(ny * 0.22 + frame * 0.22) * amp * rise
+                         + Math.sin(ny * 0.5 - frame * 0.13) * amp * 0.4 * rise;
+                ctx.drawImage(hazeCanvas, 0, yy, rw, bandH, x0 + dx, ny, rw, bandH);
+            }
+        }
+    }
+
+    // Smoke (above fire, below leaves) — per-particle shade for variety
+    if (props.showSmoke && smokeParticles.length) {
+        for (const p of smokeParticles) {
+            const a = (p.life * 0.14).toFixed(3);
+            const s = p.shade | 0;
+            ctx.fillStyle = `rgba(${s},${(s * 0.95) | 0},${(s * 0.88) | 0},${a})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Fireflies (between embers/smoke and birds — drift glow)
+    if (fireflies.length) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        for (const f of fireflies) {
+            const pulse = 0.45 + Math.sin(f.phase) * 0.45;
+            const a = pulse * f.life;
+            // Halo (smaller, fainter — keeps the spotlight on the fire)
+            ctx.fillStyle = `rgba(220,255,140,${(a * 0.10).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.arc(f.x, f.y, f.size * 2.4, 0, Math.PI * 2);
+            ctx.fill();
+            // Core
+            ctx.fillStyle = `rgba(240,255,170,${(a * 0.7).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.arc(f.x, f.y, f.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    // Ambient leaves (above smoke for that drifting feel)
+    if (leaves.length) {
+        for (const p of leaves) {
+            const a = (p.life * 0.7).toFixed(2);
+            const [r, g, b] = p.color;
+            ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, p.size * 1.5, p.size * 0.55, p.rot, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Bird flocks — small V-silhouettes high above
+    if (birds.length) {
+        ctx.strokeStyle = "rgba(18,12,8,0.85)";
+        ctx.lineCap = "round";
+        for (const b of birds) {
+            const wing = Math.abs(Math.sin(b.flap)) * 0.55 + 0.45;
+            ctx.lineWidth = b.size * 0.8;
+            ctx.beginPath();
+            ctx.moveTo(b.x - b.size * 2.5, b.y - b.size * wing);
+            ctx.lineTo(b.x, b.y);
+            ctx.lineTo(b.x + b.size * 2.5, b.y - b.size * wing);
+            ctx.stroke();
+        }
+    }
+
+    // Rain — wind-slanted streaks falling
+    if (rainDrops.length) {
+        ctx.strokeStyle = "rgba(180,210,240,0.65)";
+        ctx.lineWidth = 1.2;
+        ctx.lineCap = "round";
+        for (const r of rainDrops) {
+            // Direction = velocity (normalized × streak length)
+            const sp = Math.hypot(r.vx, r.vy) || 1;
+            const dx = (r.vx / sp) * r.len;
+            const dy = (r.vy / sp) * r.len;
+            ctx.beginPath();
+            ctx.moveTo(r.x, r.y);
+            ctx.lineTo(r.x - dx, r.y - dy);
+            ctx.stroke();
+        }
+    }
+
+    // Lightning bolts (very top, with flash) — still in world space
+    drawLightning();
+
+    // Back to screen space for the full-screen overlays + cursor UI.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    // Mouse hover indicator — small ignition-radius preview
+    if (props.showMouseHint && props.mouseInteraction && mouseInside) {
+        const r = Math.max(1, props.igniteRadius) * cell;
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,180,80,0.55)";
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([3, 4]);
+        ctx.beginPath();
+        ctx.arc(mouseX, mouseY, r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Small flame dot in centre
+        ctx.fillStyle = "rgba(255,150,60,0.85)";
+        ctx.beginPath();
+        ctx.arc(mouseX, mouseY, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // Weather ambient tint — a gentle warm haze in drought, cool wash in heavy wet
+    // weather. Kept subtle (and behind the "Screen effects" toggle) so it stays
+    // easy to look at as a desktop background.
+    if (props.screenEffects) {
+        const dry = weatherDryness();                         // 0..1 (drought)
+        const wet = Math.max(0, weatherIntensitySmooth - 0.3); // 0..0.7 (rain→storm)
+        if (dry > 0.02) {
+            ctx.save();
+            ctx.globalCompositeOperation = "soft-light";
+            ctx.fillStyle = `rgba(255,205,120,${(dry * 0.16).toFixed(3)})`;
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+        }
+        if (wet > 0.02) {
+            ctx.save();
+            ctx.globalCompositeOperation = "multiply";
+            const m = Math.min(1, wet);
+            ctx.fillStyle = `rgba(${(160 - m*35)|0},${(172 - m*25)|0},${(195 - m*8)|0},${(m * 0.16).toFixed(3)})`;
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+        }
+    }
+
+    // RGB edge vignette — bleed fire / lightning color to screen borders so
+    // Wallpaper Engine's iCUE/Aura/Razer/Chroma plugin samples vivid color.
+    // (Gentle by default; its own toggle + the Screen-effects toggle both gate it.)
+    if (props.rgbEdgeMode && props.screenEffects) {
+        // Base intensity scales with burning cells (capped) + lightning pulse
+        const fireLoad = Math.min(1, burningCount / 250);
+        const intensity = Math.max(rgbVignettePulse * 0.9, fireLoad * 0.65) * props.rgbEdgeStrength;
+        if (intensity > 0.03) {
+            // Vignette gradient: warm orange outer (fire) or cool blue (lightning)
+            const cxg = canvas.width  * 0.5;
+            const cyg = canvas.height * 0.5;
+            const inner = Math.min(canvas.width, canvas.height) * 0.35;
+            const outer = Math.max(canvas.width, canvas.height) * 0.85;
+            const grad = ctx.createRadialGradient(cxg, cyg, inner, cxg, cyg, outer);
+            const aPeak = (intensity * 0.32).toFixed(3);   // gentler than before
+            // Lightning skews tint cool, fire skews warm
+            if (rgbVignettePulse > fireLoad * 0.5) {
+                grad.addColorStop(0, "rgba(255,150,80,0)");
+                grad.addColorStop(0.6, `rgba(255,170,90,${aPeak})`);
+                grad.addColorStop(1,   `rgba(255,90,40,${(intensity * 0.55).toFixed(3)})`);
+            } else {
+                grad.addColorStop(0, "rgba(255,140,60,0)");
+                grad.addColorStop(0.6, `rgba(255,150,55,${aPeak})`);
+                grad.addColorStop(1,   `rgba(255,100,30,${(intensity * 0.6).toFixed(3)})`);
+            }
+            ctx.save();
+            ctx.globalCompositeOperation = "screen";
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.restore();
+        }
+    }
+
+    if (props.debugOverlay) {
+        debugEl.style.display = "block";
+        const wMode = WEATHER_NAMES[weatherCurrent] || "?";
+        debugEl.textContent =
+            `fps=${avgFps.toFixed(0)}  frame=${frame}  static=${staticDirty?"dirty":"clean"}\n` +
+            `burn=${burningCount}  smoke=${smokeParticles.length}  embers=${embers.length}  ` +
+            `plumes=${flamePlumes.length}  rain=${rainDrops.length}\n` +
+            `leaves=${leaves.length}  fireflies=${fireflies.length}  birds=${birds.length}  ` +
+            `clouds=${clouds.length}  bolts=${lightningBolts.length}\n` +
+            `weather=${wMode}  windDeg=${((windAngle * 180 / Math.PI) % 360).toFixed(0)}  ` +
+            `cell=${cell}  grid=${cols}x${rows}`;
+        debugEl.style.whiteSpace = "pre";
+    } else {
+        debugEl.style.display = "none";
+    }
+}
+
+// ============================================================
+// Loop (idles cheaply when nothing's happening)
+// ============================================================
+function loop() {
+    requestAnimationFrame(loop);
+
+    const now = performance.now();
+
+    // FPS cap — skip render if we haven't waited long enough.
+    // Sim still runs on its own time accumulator, so simulation is unaffected.
+    if (minFrameMs > 0 && (now - lastRenderMs) < (minFrameMs - 0.5)) {
+        // Allow sim to catch up so timing stays correct
+        if (lastSimMs === 0) lastSimMs = now;
+        return;
+    }
+    lastRenderMs = now;
+    frame++;
+
+    // FPS tracking (exponential moving average)
+    if (lastFrameMs > 0) {
+        const dt = now - lastFrameMs;
+        if (dt > 0) avgFps = avgFps * 0.92 + (1000 / dt) * 0.08;
+    }
+    lastFrameMs = now;
+
+    const isActive =
+        burningCount > 0 ||
+        smokeParticles.length > 0 ||
+        embers.length > 0 ||
+        flamePlumes.length > 0 ||
+        sparks.length > 0 ||
+        leaves.length > 0 ||
+        lightningBolts.length > 0 ||
+        lightningGlows.length > 0 ||
+        birds.length > 0 ||
+        fireflies.length > 0 ||
+        (props.showFish && fishList.length > 0) ||
+        rainDrops.length > 0 ||
+        clouds.length > 0 ||
+        weatherCurrent !== WEATHER_CLEAR ||
+        weatherTarget  !== WEATHER_CLEAR ||
+        weatherIntensitySmooth > 0.001 ||
+        weatherFrontProgress > 0.001 ||
+        props.weatherMode !== "clear" ||   // keep ticking so mode changes apply + auto-cycle runs
+        rgbVignettePulse > 0 ||
+        gustStrength > 0.01 ||
+        audioLevel > 0.02 ||
+        mouseInside ||
+        props.autoIgnite ||
+        (props.showWindParticles && props.windStrength > 0.05);
+
+    // Fixed-timestep simulation: 30 ticks/sec independent of render FPS.
+    // Lets us cap rendering at 60 or run at 120+ without overspeeding the sim.
+    if (lastSimMs === 0) lastSimMs = now;
+    if (isActive) {
+        let iters = 0;
+        while (now - lastSimMs >= SIM_TICK_MS && iters < MAX_SIM_PER_FRAME) {
+            update();
+            lastSimMs += SIM_TICK_MS;
+            iters++;
+        }
+        // If we couldn't catch up (long pause/lag), snap to now to avoid death-spiral
+        if (now - lastSimMs > SIM_TICK_MS * MAX_SIM_PER_FRAME * 2) {
+            lastSimMs = now;
+        }
+    } else {
+        lastSimMs = now; // stay in sync while idle so we don't burst on resume
+    }
+
+    render();
+}
+
+// ============================================================
+// Input
+// ============================================================
+let mouseDown = false;
+function onIgniteInput(clientX, clientY) {
+    if (!props.mouseInteraction) return;
+    // map the screen cursor into world coordinates (account for the camera)
+    igniteAt(clientX + camX, clientY + camY, props.igniteRadius);
+}
+canvas.addEventListener("mousedown",  e => { mouseDown = true; onIgniteInput(e.clientX, e.clientY); });
+canvas.addEventListener("mouseup",    () => { mouseDown = false; });
+canvas.addEventListener("mousemove",  e => {
+    mouseX = e.clientX; mouseY = e.clientY; mouseInside = true;
+    if (mouseDown) onIgniteInput(e.clientX, e.clientY);
+});
+canvas.addEventListener("mouseleave", () => { mouseInside = false; mouseDown = false; });
+canvas.addEventListener("mouseenter", e => { mouseInside = true; mouseX = e.clientX; mouseY = e.clientY; });
+canvas.addEventListener("touchstart", e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
+canvas.addEventListener("touchmove",  e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
+window.addEventListener("resize", resize);
+
+// ============================================================
+// Wallpaper Engine property listener
+// ============================================================
+function applyProperty(key, raw) {
+    if (raw == null) return;
+    const v = raw.value;
+    if (v === undefined) return;
+
+    let needRebuild = false;
+    let needBg = false;
+
+    switch (key) {
+        case "treeDensity":
+        case "grassDensity":
+        case "rockDensity":
+            props[key] = Number(v);
+            needRebuild = true;
+            needBg = true;
+            break;
+        case "cellSize":
+            props.cellSize = Math.max(1, parseInt(v, 10) || props.cellSize);
+            needRebuild = true;
+            needBg = true;
+            break;
+        case "igniteRadius":
+            props.igniteRadius = Math.max(1, parseInt(v, 10) || props.igniteRadius);
+            break;
+        case "spreadRate":
+        case "treeBurnDuration":
+        case "grassBurnDuration":
+        case "windStrength":
+        case "windRotation":
+        case "autoIgniteRate":
+        case "regrowthRate":
+        case "fireGlow":
+        case "weatherChangeSpeed":
+        case "rainIntensity":
+        case "rainScatter":
+        case "rgbEdgeStrength":
+        case "audioIntensity":
+        case "treeScale":
+        case "magicFire":
+        case "panX":
+        case "panY":
+        case "panSpeed":
+            props[key] = Number(v);
+            break;
+        case "worldSize":
+            props.worldSize = Math.max(1, Number(v) || 1);
+            resize();   // regenerate the (resized) world + camera bounds
+            break;
+        case "autoIgnite":
+        case "regrowth":
+        case "showSmoke":
+        case "showEmbers":
+        case "showFlamePlumes":
+        case "heatShimmer":
+        case "showWindParticles":
+        case "showClouds":
+        case "rainExtinguishes":
+        case "showBirds":
+        case "showFireflies":
+        case "showLeaves":
+        case "showRocks":
+        case "showElevation":
+        case "rgbEdgeMode":
+        case "screenEffects":
+        case "mousePan":
+        case "mouseInteraction":
+        case "audioReactive":
+        case "showMouseHint":
+        case "windGusts":
+        case "seedFireOnStart":
+        case "debugOverlay":
+            props[key] = !!v;
+            break;
+        case "showFish":
+            props.showFish = !!v;
+            spawnFish();   // (re)populate or clear the fish
+            break;
+        case "showRivers":
+        case "showLilyPads":
+        case "showPaths":
+            props[key] = !!v;
+            needRebuild = true;
+            needBg = true;
+            break;
+        case "weatherMode":
+            props.weatherMode = String(v);
+            break;
+        case "weatherDirection":
+            props.weatherDirection = String(v);
+            break;
+        case "quality":
+            props.quality = String(v);
+            applyQuality(props.quality);
+            break;
+        case "fpsCap":
+            props.fpsCap = String(v);
+            applyFpsCap(props.fpsCap);
+            break;
+        case "resetButton":
+            if (v) { needRebuild = true; needBg = true; }
+            break;
+    }
+
+    if (needRebuild) rebuildGrid();
+    if (needBg) drawDirtBackground();
+}
+
+window.wallpaperPropertyListener = {
+    applyUserProperties(properties) {
+        for (const key in properties) applyProperty(key, properties[key]);
+    },
+    applyGeneralProperties() { },
+};
+
+// ============================================================
+// Wallpaper Engine audio reactivity
+// API: window.wallpaperRegisterAudioListener(cb) where cb receives 64 floats (0..1)
+// ============================================================
+function audioCallback(audioArray) {
+    if (!audioArray || !audioArray.length) return;
+    let sum = 0, bass = 0;
+    const bassN = Math.min(8, audioArray.length);
+    for (let i = 0; i < audioArray.length; i++) sum += audioArray[i];
+    for (let i = 0; i < bassN; i++) bass += audioArray[i];
+    // Smooth (exponential moving average) so flicker is gentle
+    const sFull = sum / audioArray.length;
+    const sBass = bass / bassN;
+    audioLevel = audioLevel * 0.78 + sFull * 0.22;
+    audioBass  = audioBass  * 0.70 + sBass * 0.30;
+}
+if (typeof window.wallpaperRegisterAudioListener === "function") {
+    window.wallpaperRegisterAudioListener(audioCallback);
+}
+
+// ============================================================
+// Boot
+// ============================================================
+applyQuality(props.quality);
+applyFpsCap(props.fpsCap);
+resize();
+// Seed a starter fire so the wallpaper opens with visible action
+if (props.seedFireOnStart) {
+    setTimeout(() => {
+        // near the world centre (roughly where the default camera looks)
+        const x = worldPxW * (0.4 + Math.random() * 0.2);
+        const y = worldPxH * (0.4 + Math.random() * 0.2);
+        igniteAt(x, y, 2);
+    }, 200);
+}
+loop();
+</script>
+</body>
+</html>

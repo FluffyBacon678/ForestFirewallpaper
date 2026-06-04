@@ -1,0 +1,11 @@
+# Claude Code local config (references absolute local paths)
+.claude/
+
+# Node / tooling
+node_modules/
+npm-debug.log*
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store

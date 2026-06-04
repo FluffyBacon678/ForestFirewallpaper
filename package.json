@@ -1,0 +1,12 @@
+{
+    "name": "wallpaper-forest-fire",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Interactive forest wildfire wallpaper for Wallpaper Engine. Click anywhere to ignite a fire that spreads with wind; trees regrow over time.",
+    "scripts": {
+        "dev": "node .dev-server.js",
+        "start": "node .dev-server.js"
+    },
+    "license": "MIT",
+    "//": "No build step. Single index.html runs directly in Wallpaper Engine; the dev server is purely for browser testing on port 5174 (marimo uses 5173)."
+}
