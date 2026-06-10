@@ -99,24 +99,34 @@ Features:
 
 ## Performance
 
-Verified ~3 ms / frame under heavy storm + fires (320 fps theoretical headroom on
-my dev machine). Comfortable at 60 / 120 / 144 fps on modest hardware.
+Comfortable at 60 / 120 / 144 fps on modest hardware. The wallpaper defaults to
+a 120 fps cap so high-refresh desktops get smoother motion, while the sim keeps
+fire spread, weather, regrowth and particle lifetimes at the same gameplay pace.
 
 Key optimizations:
 - **Two-tier baked layers**: the worldgen-static terrain (dirt, smooth water,
   paths, lily pads, rocks, grass) is baked once per world; the per-fire static
-  layer (terrain blit + ash) rebuilds in ~0.04 ms, so wildfires never hitch even
-  though the smooth-water blur costs ~12 ms (that only runs on world regen)
-- Fixed-timestep simulation (30 ticks/sec) decoupled from render rate
+  layer (terrain blit + ash) rebuilds in well under a millisecond, so wildfires
+  never hitch even though the smooth-water blur costs ~12 ms (world regen only)
+- **Visible-region tree layer** — the swaying-tree layer only re-renders the
+  on-screen window (+ a pan margin), not the whole oversized world, and blits
+  trees 1:1 from a pre-scaled 20-bucket size atlas instead of scaling every
+  drawImage (this alone cut typical frame time ~4×, and integer-snapped blits
+  render the pixel-art trees crisper too)
+- **Visible-window effect passes** — fire glow, ash smoulder glow and water
+  sparkles scan/draw only the on-screen cells; off-screen fire still simulates
+  but costs no draw time
+- **Strided regrowth** — the full-grid ash/regrowth pass visits ¼ of the cells
+  per tick at 4× rates (statistically identical, quarter the scan cost)
+- Opaque (`alpha:false`) main canvas + the world-sized scratch canvas kept out
+  of the DOM compositor entirely
+- Fixed-timestep simulation decoupled from render rate, with render
+  interpolation for moving particles/fish/birds/rain/smoke
 - In-place particle compaction (no `kept = []` allocations per frame)
-- Sprite atlases for trees, grass, rocks
-- Static rebuilds throttled to once per 3 frames
-- **Cached tree layer** — the thousands of detailed trees in a lush forest are
-  rendered to an offscreen layer rebuilt every 3 frames (sway is slow enough to
-  look smooth), so a dense zoomed-out forest stays cheap to draw
+- Sprite atlases for trees, grass, rocks; static rebuilds throttled
 
 If you're on a weaker GPU, drop **Quality preset** to Medium (70% particles) or
-Low (40% particles + several effects disabled). Use **Max FPS** = 30 for battery
+Low (40% particles + several effects disabled). Use **Max FPS** = 30/60 for battery
 laptops.
 
 ## Files

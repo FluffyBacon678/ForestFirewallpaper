@@ -31,11 +31,11 @@
                 "order":  2,
                 "text":   "Max FPS",
                 "type":   "combo",
-                "value":  "60",
+                "value":  "120",
                 "options": [
                     { "label": "30 fps (battery saver)",  "value": "30"        },
-                    { "label": "60 fps (recommended)",    "value": "60"        },
-                    { "label": "120 fps (high refresh)",  "value": "120"       },
+                    { "label": "60 fps (power saver)",    "value": "60"        },
+                    { "label": "120 fps (recommended)",   "value": "120"       },
                     { "label": "144 fps",                 "value": "144"       },
                     { "label": "Unlimited (match monitor)", "value": "unlimited" }
                 ]

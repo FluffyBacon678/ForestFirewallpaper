@@ -7,6 +7,9 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0f08; }
     canvas { display: block; position: absolute; inset: 0; }
+    /* #bg is only a drawImage SOURCE (world-sized) — keep it out of the
+       compositor entirely; drawing from a display:none canvas still works. */
+    #bg { display: none; }
     #debug {
       position: fixed; top: 8px; left: 8px;
       color: rgba(255,255,255,0.75);
@@ -84,7 +87,7 @@ const props = {
     rgbEdgeStrength:   0.7,
     // Performance
     quality:           "high",
-    fpsCap:            "60",
+    fpsCap:            "120",
     // Audio reactivity (Wallpaper Engine system audio)
     audioReactive:     true,
     audioIntensity:    1.0,
@@ -244,7 +247,10 @@ const TREE_TINTS = [
 const bgCanvas = document.getElementById("bg");
 const bgCtx    = bgCanvas.getContext("2d");
 const canvas   = document.getElementById("c");
-const ctx      = canvas.getContext("2d");
+// Opaque + desynchronized: the scene always covers the whole screen, so an
+// alpha-less canvas lets the browser skip blending it with the page (cheaper
+// compositing every frame); desynchronized hints low-latency presentation.
+const ctx      = canvas.getContext("2d", { alpha: false, desynchronized: true });
 const debugEl  = document.getElementById("debug");
 
 let cols = 0, rows = 0;
@@ -286,6 +292,7 @@ let windAngle = Math.random() * Math.PI * 2;
 let frame = 0;
 let burningCount = 0;
 let terrainSeed = 12345;
+let regrowPhase = 0;   // rotating 0..3 offset for the strided regrowth pass
 // Camera: the world is bigger than the viewport; (camX,camY) is the world-pixel
 // position of the screen's top-left corner.
 let camX = 0, camY = 0;
@@ -299,7 +306,7 @@ let grassSprites = null;
 // frame, so they're rendered into this offscreen canvas and rebuilt only every
 // few frames (the per-tree sway is slow enough that this looks smooth).
 let treeLayerCanvas = null, treeLayerCtx = null, treeLayerCountdown = 0;
-const TREE_LAYER_GAP = 3;
+const TREE_LAYER_GAP = 1; // rebuild every render so tree sway stays smooth at 60fps+
 let treeSpW = 0, treeSpH = 0;
 let grassSpW = 0, grassSpH = 0;
 // Per-cell positional jitter (broken-grid look)
@@ -325,8 +332,14 @@ const STATIC_REBUILD_MIN_GAP = 3; // re-bake at most every N frames even if dirt
 let lastFrameMs   = 0;
 let avgFps        = 60;
 let lastSimMs     = 0;
-const SIM_TICK_MS = 1000 / 30;   // 30 sim ticks/sec regardless of frame rate
-const MAX_SIM_PER_FRAME = 5;     // cap catch-up loops to avoid death spiral
+let simClock      = 0;           // baseline ticks; advances smoothly at SIM_BASE_HZ
+let simAlpha      = 1;           // render interpolation between fixed sim ticks
+const SIM_BASE_HZ = 30;          // tuning baseline for gameplay/probability constants
+const SIM_HZ      = 60;          // visual update rate for smooth 60fps+ animation
+const SIM_TICK_MS = 1000 / SIM_HZ;
+const SIM_DT      = SIM_BASE_HZ / SIM_HZ;
+const MAX_SIM_PER_FRAME = 8;     // cap catch-up loops to avoid death spiral
+let renderTimeSec = 0;
 
 // FPS cap — 0 = unlimited, otherwise minimum ms between rendered frames
 let minFrameMs    = 0;
@@ -497,6 +510,43 @@ function buildSpriteAtlases() {
     gc.clearRect(0, 0, grassSprites.width, grassSprites.height);
     for (let v = 0; v < GRASS_NUM_VARIANTS; v++) {
         renderGrassTopDown(gc, v * grassSpW, 0, grassSpW, grassSpH, v);
+    }
+
+    buildScaledTreeAtlas();
+}
+
+// ============================================================
+// Pre-scaled tree atlas — the per-frame tree pass blits these 1:1 instead of
+// scaling treeSprites every draw (scaled drawImage was the #1 frame cost).
+// Growth (0..1) maps to TREE_SIZE_BUCKETS pre-baked sizes; the ~1.8% size
+// quantization is invisible, and 1:1 integer blits render crisper too.
+// ============================================================
+const TREE_SIZE_BUCKETS = 20;
+let treeScaled = null;          // canvas: TREE_SIZE_BUCKETS rows × TREE_NUM_VARIANTS cols
+let treeScaledW = [], treeScaledH = [];   // per-bucket sprite dims (ints)
+let treeScaledCellW = 0, treeScaledCellH = 0; // atlas grid cell (max sprite dims)
+
+function buildScaledTreeAtlas() {
+    const ts = props.treeScale || 1;
+    const maxScale = (0.30 + 0.70) * ts;            // growth=1
+    treeScaledCellW = Math.ceil(treeSpW * maxScale);
+    treeScaledCellH = Math.ceil(treeSpH * maxScale);
+    if (!treeScaled) treeScaled = document.createElement("canvas");
+    treeScaled.width  = treeScaledCellW * TREE_NUM_VARIANTS;
+    treeScaled.height = treeScaledCellH * TREE_SIZE_BUCKETS;
+    const c = treeScaled.getContext("2d");
+    c.clearRect(0, 0, treeScaled.width, treeScaled.height);
+    c.imageSmoothingEnabled = true;                 // quality scaling, baked once
+    treeScaledW.length = 0; treeScaledH.length = 0;
+    for (let b = 0; b < TREE_SIZE_BUCKETS; b++) {
+        const scale = (0.30 + (b / (TREE_SIZE_BUCKETS - 1)) * 0.70) * ts;
+        const dw = Math.max(1, Math.round(treeSpW * scale));
+        const dh = Math.max(1, Math.round(treeSpH * scale));
+        treeScaledW.push(dw); treeScaledH.push(dh);
+        for (let v = 0; v < TREE_NUM_VARIANTS; v++) {
+            c.drawImage(treeSprites, v * treeSpW, 0, treeSpW, treeSpH,
+                        v * treeScaledCellW, b * treeScaledCellH, dw, dh);
+        }
     }
 }
 
@@ -1233,13 +1283,14 @@ function spawnFish() {
         });
     }
 }
-function updateFish() {
+function updateFish(dt) {
     if (!props.showFish || !fishList.length) return;
     for (const f of fishList) {
-        f.wob += 0.12;
+        rememberPos(f);
+        f.wob += 0.12 * dt;
         f.ang += Math.sin(f.wob * 0.3) * 0.05;        // gentle meander
-        const nx = f.x + Math.cos(f.ang) * f.speed * 2.2;
-        const ny = f.y + Math.sin(f.ang) * f.speed * 2.2;
+        const nx = f.x + Math.cos(f.ang) * f.speed * 2.2 * dt;
+        const ny = f.y + Math.sin(f.ang) * f.speed * 2.2 * dt;
         if (isWaterAt(nx, ny)) { f.x = nx; f.y = ny; }
         else { f.ang += 1.9 + Math.random() * 0.8; }  // bounce off the shore
     }
@@ -1516,12 +1567,12 @@ function spawnLightning(targetX, targetY) {
     lightningGlows.push({ x: targetX, y: targetY, life: 1.0 });
 }
 
-function updateLightningGlows() {
+function updateLightningGlows(dt) {
     if (!lightningGlows.length) return;
     let writeI = 0;
     for (let i = 0; i < lightningGlows.length; i++) {
         const g = lightningGlows[i];
-        g.life -= 0.012;
+        g.life -= 0.012 * dt;
         if (g.life > 0) lightningGlows[writeI++] = g;
     }
     lightningGlows.length = writeI;
@@ -1544,14 +1595,14 @@ function drawLightningGlows() {
     ctx.restore();
 }
 
-function updateLightning() {
+function updateLightning(dt) {
     if (!lightningBolts.length) return;
     let writeI = 0;
     for (let i = 0; i < lightningBolts.length; i++) {
         const b = lightningBolts[i];
-        b.life -= 0.07;
-        b.flash *= 0.78;
-        b.jitter = (b.jitter + 1) & 7;
+        b.life -= 0.07 * dt;
+        b.flash *= damp(0.78, dt);
+        b.jitter = (b.jitter + dt) % 8;
         if (b.life > 0) lightningBolts[writeI++] = b;
     }
     lightningBolts.length = writeI;
@@ -1654,7 +1705,7 @@ function targetWeatherFromMode() {
     }
 }
 
-function updateWeather() {
+function updateWeather(dt) {
     const forced = targetWeatherFromMode();
     if (forced !== null) {
         weatherTarget = forced;
@@ -1662,7 +1713,7 @@ function updateWeather() {
         // Auto-cycle: random-walk one step along the spectrum so changes are
         // gradual and sensible (never jumps sunny → storm). Mild mean-reversion
         // toward the middle keeps it from parking at an extreme.
-        weatherTimer -= props.weatherChangeSpeed;
+        weatherTimer -= props.weatherChangeSpeed * dt;
         if (weatherTimer <= 0 && weatherCurrent === weatherTarget) {
             const mid = (WEATHER_COUNT - 1) / 2;
             const towardMid = weatherTarget < mid ? 0.62 : (weatherTarget > mid ? 0.38 : 0.5);
@@ -1674,7 +1725,7 @@ function updateWeather() {
 
     // Step current toward target one stage at a time, easing the blend each stage
     if (weatherCurrent !== weatherTarget) {
-        weatherBlend -= (forced !== null ? 0.010 : 0.007) * props.weatherChangeSpeed;
+        weatherBlend -= (forced !== null ? 0.010 : 0.007) * props.weatherChangeSpeed * dt;
         if (weatherBlend <= 0) {
             weatherCurrent += (weatherTarget > weatherCurrent ? 1 : -1); // one stage at a time
             weatherBlend = 1.0;
@@ -1685,7 +1736,7 @@ function updateWeather() {
     // This lets forced Storm/Rain begin as a light scattered front and escalate
     // gradually while weatherCurrent still walks through the intermediate modes.
     const targetIntensity = WEATHER_MOISTURE[weatherTarget];
-    const intensityStep   = 0.0018 * props.weatherChangeSpeed;
+    const intensityStep   = 0.0018 * props.weatherChangeSpeed * dt;
     if (weatherIntensitySmooth < targetIntensity) {
         weatherIntensitySmooth = Math.min(targetIntensity, weatherIntensitySmooth + intensityStep);
     } else if (weatherIntensitySmooth > targetIntensity) {
@@ -1695,7 +1746,7 @@ function updateWeather() {
     // Front progress — advances when weather is (heading) wet, recedes when drying.
     const wantsFront    = WEATHER_MOISTURE[weatherTarget] > 0.10
                        || weatherIntensitySmooth > 0.10;
-    const frontStep     = 0.0032 * props.weatherChangeSpeed;
+    const frontStep     = 0.0032 * props.weatherChangeSpeed * dt;
     const targetFront   = wantsFront ? 1.0 : 0.0;
     if (weatherFrontProgress < targetFront) {
         weatherFrontProgress = Math.min(1.0, weatherFrontProgress + frontStep);
@@ -1712,6 +1763,23 @@ function weatherFrontCovers(px, py) {
 function smooth01(t) {
     t = Math.max(0, Math.min(1, t));
     return t * t * (3 - 2 * t);
+}
+
+function damp(base, dt) {
+    return Math.pow(base, dt);
+}
+
+function rememberPos(p) {
+    p.px = p.x;
+    p.py = p.y;
+}
+
+function drawX(p) {
+    return p.px === undefined ? p.x : p.px + (p.x - p.px) * simAlpha;
+}
+
+function drawY(p) {
+    return p.py === undefined ? p.y : p.py + (p.y - p.py) * simAlpha;
 }
 
 function weatherFrontAmount(px, py) {
@@ -1737,8 +1805,8 @@ function weatherFrontAmount(px, py) {
     const scatter = Math.max(0, Math.min(1, props.rainScatter));
     if (scatter <= 0.01) return frontSoftness;
 
-    const driftX = frame * 0.004 * Math.cos(windAngle);
-    const driftY = frame * 0.004 * Math.sin(windAngle);
+    const driftX = simClock * 0.004 * Math.cos(windAngle);
+    const driftY = simClock * 0.004 * Math.sin(windAngle);
     const patch = fbm(px * 0.006 + driftX, py * 0.006 + driftY, terrainSeed + 931, 3);
     const patchFactor = 1 - scatter + scatter * smooth01((patch - 0.24) / 0.56);
     return frontSoftness * patchFactor;
@@ -1787,31 +1855,33 @@ function spawnCloud() {
     });
 }
 
-function updateClouds() {
+function updateClouds(dt) {
     const intensity = weatherIntensity();
     if (!props.showClouds || intensity < 0.2) {
         // Fade existing clouds out (in place)
         let writeI = 0;
         for (let i = 0; i < clouds.length; i++) {
             const c = clouds[i];
-            c.opacity -= 0.005;
+            c.opacity -= 0.005 * dt;
             if (c.opacity > 0) clouds[writeI++] = c;
         }
         clouds.length = writeI;
         return;
     }
     const targetClouds = Math.ceil(intensity * MAX_CLOUDS);
-    if (clouds.length < targetClouds && Math.random() < 0.06) spawnCloud();
+    if (clouds.length < targetClouds && Math.random() < 0.06 * dt) spawnCloud();
 
     const wxF = Math.cos(windAngle);
     const wyF = Math.sin(windAngle);
     let writeI = 0;
     for (let i = 0; i < clouds.length; i++) {
         const c = clouds[i];
-        c.vx = c.vx * 0.97 + wxF * 0.25 * 0.05 * (1 + props.windStrength);
-        c.vy = c.vy * 0.97 + wyF * 0.25 * 0.05 * (1 + props.windStrength);
-        c.x += c.vx;
-        c.y += c.vy;
+        rememberPos(c);
+        const cloudDamp = damp(0.97, dt);
+        c.vx = c.vx * cloudDamp + wxF * 0.25 * 0.05 * (1 + props.windStrength) * dt;
+        c.vy = c.vy * cloudDamp + wyF * 0.25 * 0.05 * (1 + props.windStrength) * dt;
+        c.x += c.vx * dt;
+        c.y += c.vy * dt;
         if (c.x > -c.size && c.x < worldPxW + c.size
          && c.y > -c.size && c.y < worldPxH + c.size) {
             clouds[writeI++] = c;
@@ -1823,7 +1893,7 @@ function updateClouds() {
 // ============================================================
 // Rain — falling streaks influenced by wind; can extinguish fires
 // ============================================================
-function updateRain() {
+function updateRain(dt) {
     // Use smoothed intensity so escalation is gradual
     const intensity = weatherIntensitySmooth;
     const isWet = intensity > 0.05 && weatherFrontProgress > 0.01;
@@ -1831,7 +1901,8 @@ function updateRain() {
     if (isWet && props.rainIntensity > 0) {
         const wxF = Math.cos(windAngle);
         const wyF = Math.sin(windAngle);
-        const rainSpawn = Math.min(60, 18 * intensity * props.rainIntensity + 8 * intensity * intensity);
+        const rainSpawnFloat = Math.min(60, 18 * intensity * props.rainIntensity + 8 * intensity * intensity) * dt;
+        const rainSpawn = (rainSpawnFloat | 0) + (Math.random() < (rainSpawnFloat % 1) ? 1 : 0);
         const rainCap = (MAX_RAIN * qMul) | 0;
         for (let n = 0; n < rainSpawn; n++) {
             if (rainDrops.length >= rainCap) break;
@@ -1851,7 +1922,7 @@ function updateRain() {
             const tries = Math.ceil(intensity * 3);
             const cell = Math.max(2, props.cellSize | 0);
             for (let t = 0; t < tries; t++) {
-                if (Math.random() < intensity * 0.6) {
+                if (Math.random() < intensity * 0.6 * dt) {
                     // Find a random burning cell and extinguish it
                     const sampleStart = (Math.random() * grid.length) | 0;
                     for (let k = 0; k < 200; k++) {
@@ -1890,8 +1961,9 @@ function updateRain() {
         let writeI = 0;
         for (let i = 0; i < rainDrops.length; i++) {
             const r = rainDrops[i];
-            r.x += r.vx;
-            r.y += r.vy;
+            rememberPos(r);
+            r.x += r.vx * dt;
+            r.y += r.vy * dt;
             if (r.y < maxY && r.x > minX && r.x < maxX) {
                 rainDrops[writeI++] = r;
             }
@@ -1977,9 +2049,10 @@ function spawnLeaf() {
 // ============================================================
 // Simulation update
 // ============================================================
-function update() {
+function update(dt = SIM_DT) {
+    simClock += dt;
     // Wind — base + gust burst, audio bass also nudges strength briefly
-    windAngle += 0.003 * props.windRotation;
+    windAngle += 0.003 * props.windRotation * dt;
     const effectiveWind = props.windStrength + gustStrength + (props.audioReactive ? audioBass * 0.6 : 0);
     const wxF = Math.cos(windAngle);
     const wyF = Math.sin(windAngle);
@@ -2000,7 +2073,7 @@ function update() {
         const targetLightning = WEATHER_LIGHTNING[weatherTarget] || 1;
         const currentLightning = WEATHER_LIGHTNING[weatherCurrent] || 1;
         chance *= currentLightning + (targetLightning - currentLightning) * wetStormRamp;
-        if (Math.random() < chance) randomSpark();
+        if (Math.random() < chance * dt) randomSpark();
     }
 
     // Collect currently-burning cells so spread uses current state
@@ -2014,7 +2087,7 @@ function update() {
 
     for (let k = 0; k < burningList.length; k++) {
         const i = burningList[k];
-        burnTimer[i] -= 1;
+        burnTimer[i] -= dt;
 
         const isTree = grid[i] === BURN_TREE;
 
@@ -2055,7 +2128,7 @@ function update() {
             else continue;
             const windBonus = dx * wxN + dy * wyN;
             const chance = (spread + Math.max(0, windBonus)) * spreadGate;
-            if (chance > 0 && Math.random() < chance) {
+            if (chance > 0 && Math.random() < chance * dt) {
                 igniteCell(ni);
             }
         }
@@ -2063,7 +2136,7 @@ function update() {
         // Heat 0..1 from neighbour density, smoothed toward the new value so a
         // packed blaze ramps up its glow rather than snapping.
         const heatTarget = burningNeighbors / 8;
-        fireHeat[i] += (heatTarget - fireHeat[i]) * 0.25;
+        fireHeat[i] += (heatTarget - fireHeat[i]) * (1 - damp(0.75, dt));
         const heat = fireHeat[i];
 
         // Effective output scales with how big the flame currently is (intensity)
@@ -2073,7 +2146,7 @@ function update() {
         // Smoke — little while smoldering, billowing at blaze peak
         if (props.showSmoke && smokeParticles.length < (MAX_SMOKE * qMul) | 0) {
             const smokeChance = (isTree ? 0.11 : 0.05) * output;
-            if (Math.random() < smokeChance) {
+            if (Math.random() < smokeChance * dt) {
                 const sMag = 0.7 * props.windStrength;
                 const shade = isTree
                     ? (95 + Math.random() * 90) | 0
@@ -2094,7 +2167,7 @@ function update() {
         // Embers — more thrown from a roaring, clustered blaze
         if (props.showEmbers && embers.length < (MAX_EMBERS * qMul) | 0) {
             const emberChance = (isTree ? 0.10 : 0.025) * output;
-            if (Math.random() < emberChance) {
+            if (Math.random() < emberChance * dt) {
                 embers.push({
                     x: x * cell + cell * 0.5,
                     y: y * cell + cell * 0.5,
@@ -2111,7 +2184,7 @@ function update() {
         // Each gets a random shape "kind" + a curl direction so the fire is varied.
         if (props.showFlamePlumes && flamePlumes.length < (MAX_PLUMES * qMul) | 0) {
             const plumeChance = (isTree ? 0.34 : 0.13) * output;
-            if (Math.random() < plumeChance) {
+            if (Math.random() < plumeChance * dt) {
                 const sizeBase = (isTree ? 2.2 : 1.2) * (0.25 + intensity * 1.05) * (1 + heat * 0.7);
                 // kind: 0 standard, 1 tall wispy, 2 wide squat, 3 curly licker.
                 // Occasional taller flare-up at peak intensity.
@@ -2140,7 +2213,7 @@ function update() {
                 });
                 // Crackling sparks pop off vigorous, hot flames
                 if (props.showEmbers && sparks.length < (MAX_SPARKS * qMul) | 0
-                    && Math.random() < (0.12 + heat * 0.3) * intensity) {
+                    && Math.random() < (0.12 + heat * 0.3) * intensity * dt) {
                     const n = 1 + (Math.random() * 2 | 0);
                     for (let sN = 0; sN < n; sN++) {
                         sparks.push({
@@ -2157,16 +2230,20 @@ function update() {
         }
     }
 
-    // Ash decay + smolder embers + regrowth (single pass over grid)
+    // Ash decay + smolder embers + regrowth.
     // Succession: ash → bare dirt → grass → tree. Tree saplings strongly favour
     // ground next to surviving trees (seed fall), so forest grows back from its
     // edges and burn scars near woodland re-fuel naturally.
+    // STRIDED: each tick visits 1/4 of the grid with dt×4 — statistically the
+    // same rates/timers at a quarter of the per-tick scan cost.
     const regrowGrass    = props.regrowth ? 0.00016 * props.regrowthRate : 0;
     const regrowTreeBase = props.regrowth ? 0.00016 * props.regrowthRate : 0;
-    for (let i = 0; i < grid.length; i++) {
+    regrowPhase = (regrowPhase + 1) & 3;
+    const sdt = dt * 4;
+    for (let i = regrowPhase; i < grid.length; i += 4) {
         const s = grid[i];
         if (s === ASH_GRASS || s === ASH_TREE) {
-            burnTimer[i] -= 1;
+            burnTimer[i] -= sdt;
             // hot smouldering ash → cold charred earth (a lingering burn scar)
             if (burnTimer[i] <= 0) {
                 grid[i] = CHARRED;
@@ -2176,7 +2253,7 @@ function update() {
             }
             // Smoulder: fresh ash occasionally pops a tiny ember
             if (props.showEmbers && burnTimer[i] > 120
-                && embers.length < (MAX_EMBERS * qMul) | 0 && Math.random() < 0.02) {
+                && embers.length < (MAX_EMBERS * qMul) | 0 && Math.random() < 0.02 * sdt) {
                 const y = (i / cols) | 0;
                 const x = i - y * cols;
                 embers.push({
@@ -2191,17 +2268,17 @@ function update() {
             }
         } else if (s === CHARRED) {
             // The scar slowly cools and heals back to bare earth, then regrows.
-            burnTimer[i] -= 1;
+            burnTimer[i] -= sdt;
             if (burnTimer[i] <= 0) { grid[i] = DIRT; terrainRestoreDirt(i); }
         } else if (s === DIRT && regrowGrass > 0) {
-            if (Math.random() < regrowGrass) {
+            if (Math.random() < regrowGrass * sdt) {
                 grid[i] = GRASS;
                 grassVar[i] = pickGrassVariant();
                 terrainDrawGrass(i); // incremental: stamp the new tuft onto terrain
             }
         } else if (s === GRASS && regrowTreeBase > 0) {
             // Cheap pre-roll, then a neighbour check decides if a sapling takes.
-            if (Math.random() < regrowTreeBase) {
+            if (Math.random() < regrowTreeBase * sdt) {
                 const y = (i / cols) | 0, x = i - y * cols;
                 let treeNeighbors = 0;
                 for (let d = 0; d < NEIGHBOURS.length; d++) {
@@ -2222,13 +2299,13 @@ function update() {
             }
         } else if (s === TREE && treeGrowth[i] < 1) {
             // Saplings mature into full trees over ~1–2 minutes
-            treeGrowth[i] = Math.min(1, treeGrowth[i] + 0.00045 * Math.max(0.4, props.regrowthRate));
+            treeGrowth[i] = Math.min(1, treeGrowth[i] + 0.00045 * Math.max(0.4, props.regrowthRate) * sdt);
         }
     }
 
     // Wind gusts — occasional burst that shifts angle and boosts speed briefly
     if (props.windGusts) {
-        nextGustAt--;
+        nextGustAt -= dt;
         if (nextGustAt <= 0 && gustTimer <= 0) {
             // Stormier weather makes gusts more frequent and stronger
             const storm = (weatherCurrent >= WEATHER_MONSOON) ? 1 : 0;
@@ -2238,33 +2315,34 @@ function update() {
             nextGustAt   = (500 + Math.random() * 900) | 0;
         }
         if (gustTimer > 0) {
-            gustTimer--;
-            gustStrength *= 0.985;
+            gustTimer -= dt;
+            gustStrength *= damp(0.985, dt);
         } else {
             gustStrength = 0;
         }
     }
 
     // Periodically resync glowing-mushroom spots (handles burn/regrowth changes)
-    if (--glowRefreshAt <= 0) refreshGlowSpots();
+    glowRefreshAt -= dt;
+    if (glowRefreshAt <= 0) refreshGlowSpots();
 
     // Fish glide in the water
-    updateFish();
+    updateFish(dt);
 
     // Weather + lightning bolts (+ persistent strike afterglow)
-    updateWeather();
-    updateClouds();
-    updateRain();
-    updateLightning();
-    updateLightningGlows();
+    updateWeather(dt);
+    updateClouds(dt);
+    updateRain(dt);
+    updateLightning(dt);
+    updateLightningGlows(dt);
 
     // Decay RGB vignette pulse
-    if (rgbVignettePulse > 0) rgbVignettePulse = Math.max(0, rgbVignettePulse - 0.02);
+    if (rgbVignettePulse > 0) rgbVignettePulse = Math.max(0, rgbVignettePulse - 0.02 * dt);
 
     // Bird flocks — spawn rarely, drift across (skip in storms)
     // Birds keep clear of heavy weather (monsoon / storm)
     if (props.showBirds && weatherCurrent < WEATHER_MONSOON
-        && birds.length < (60 * qMul) | 0 && Math.random() < 0.0008) spawnBirdFlock();
+        && birds.length < (60 * qMul) | 0 && Math.random() < 0.0008 * dt) spawnBirdFlock();
     if (birds.length) {
         const minX = -60, maxX = worldPxW + 60;
         const minY = -60, maxY = worldPxH + 60;
@@ -2287,6 +2365,7 @@ function update() {
         let writeI = 0;
         for (let i = 0; i < birds.length; i++) {
             const b = birds[i];
+            rememberPos(b);
             // Steer away from fire centroid when nearby
             if (fcn > 0) {
                 const dx = b.x - fcx, dy = b.y - fcy;
@@ -2295,8 +2374,8 @@ function update() {
                 if (d2 < reach * reach) {
                     const d = Math.sqrt(d2) || 1;
                     const push = (1 - d / reach) * 0.45;
-                    b.vx += (dx / d) * push;
-                    b.vy += (dy / d) * push * 0.5;
+                    b.vx += (dx / d) * push * dt;
+                    b.vy += (dy / d) * push * 0.5 * dt;
                     // Renormalize speed so they don't accelerate forever
                     const sp = Math.hypot(b.vx, b.vy);
                     const targetSp = 1.6;
@@ -2306,9 +2385,9 @@ function update() {
                     }
                 }
             }
-            b.x += b.vx;
-            b.y += b.vy;
-            b.flap += b.flapSpd;
+            b.x += b.vx * dt;
+            b.y += b.vy * dt;
+            b.flap += b.flapSpd * dt;
             if (b.x > minX && b.x < maxX && b.y > minY && b.y < maxY) {
                 birds[writeI++] = b;
             }
@@ -2318,17 +2397,19 @@ function update() {
 
     // Fireflies — slowly populate up to a target count, drift gently with phase glow
     const TARGET_FIREFLIES = props.showFireflies ? ((40 * qMul) | 0) : 0;
-    if (fireflies.length < TARGET_FIREFLIES && Math.random() < 0.05) spawnFirefly();
+    if (fireflies.length < TARGET_FIREFLIES && Math.random() < 0.05 * dt) spawnFirefly();
     if (!props.showFireflies && fireflies.length) fireflies = [];
     if (fireflies.length) {
         for (const f of fireflies) {
-            f.x += f.vx;
-            f.y += f.vy;
-            f.vx += (Math.random() - 0.5) * 0.06;
-            f.vy += (Math.random() - 0.5) * 0.06;
-            f.vx *= 0.96;
-            f.vy *= 0.96;
-            f.phase += f.phaseSpd;
+            rememberPos(f);
+            f.x += f.vx * dt;
+            f.y += f.vy * dt;
+            f.vx += (Math.random() - 0.5) * 0.06 * dt;
+            f.vy += (Math.random() - 0.5) * 0.06 * dt;
+            const fireflyDamp = damp(0.96, dt);
+            f.vx *= fireflyDamp;
+            f.vy *= fireflyDamp;
+            f.phase += f.phaseSpd * dt;
             // Wrap edges
             if (f.x < -10) f.x = worldPxW + 10;
             if (f.x > worldPxW + 10) f.x = -10;
@@ -2340,7 +2421,7 @@ function update() {
     // Ambient leaves drifting in wind (independent of fire)
     if (props.showLeaves && props.showWindParticles && props.windStrength > 0.05) {
         const spawnRate = 0.25 * Math.min(1, props.windStrength);
-        if (leaves.length < (MAX_LEAVES * qMul) | 0 && Math.random() < spawnRate) spawnLeaf();
+        if (leaves.length < (MAX_LEAVES * qMul) | 0 && Math.random() < spawnRate * dt) spawnLeaf();
         const wxL = wxF * 0.05 * props.windStrength;
         const wyL = wyF * 0.05 * props.windStrength;
         const minX = -25, maxX = worldPxW + 25;
@@ -2348,12 +2429,14 @@ function update() {
         let writeI = 0;
         for (let i = 0; i < leaves.length; i++) {
             const p = leaves[i];
-            p.x += p.vx;
-            p.y += p.vy;
-            p.vx = p.vx * 0.985 + wxL + (Math.random() - 0.5) * 0.12;
-            p.vy = p.vy * 0.985 + wyL + (Math.random() - 0.5) * 0.12;
-            p.rot += p.rotSpd;
-            p.life -= 0.0022;
+            rememberPos(p);
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            const leafDamp = damp(0.985, dt);
+            p.vx = p.vx * leafDamp + (wxL + (Math.random() - 0.5) * 0.12) * dt;
+            p.vy = p.vy * leafDamp + (wyL + (Math.random() - 0.5) * 0.12) * dt;
+            p.rot += p.rotSpd * dt;
+            p.life -= 0.0022 * dt;
             if (p.life > 0 && p.x > minX && p.x < maxX && p.y > minY && p.y < maxY) {
                 leaves[writeI++] = p;
             }
@@ -2370,12 +2453,14 @@ function update() {
         let writeI = 0;
         for (let i = 0; i < smokeParticles.length; i++) {
             const p = smokeParticles[i];
-            p.x += p.vx + wxA;
-            p.y += p.vy + wyA;
-            p.vx *= 0.985;
-            p.vy *= 0.985;
-            p.size += p.grow;
-            p.life -= 0.0075;
+            rememberPos(p);
+            p.x += (p.vx + wxA) * dt;
+            p.y += (p.vy + wyA) * dt;
+            const smokeDamp = damp(0.985, dt);
+            p.vx *= smokeDamp;
+            p.vy *= smokeDamp;
+            p.size += p.grow * dt;
+            p.life -= 0.0075 * dt;
             if (p.life > 0) smokeParticles[writeI++] = p;
         }
         smokeParticles.length = writeI;
@@ -2388,13 +2473,15 @@ function update() {
         let writeI = 0;
         for (let i = 0; i < flamePlumes.length; i++) {
             const p = flamePlumes[i];
-            p.x += p.vx;
-            p.y += p.vy;
-            p.vx = p.vx * 0.93 + wxA;
-            p.vy = p.vy * 0.93 + wyA;
-            p.size *= 1.038;
-            p.life -= 0.043;
-            p.phase += 1;
+            rememberPos(p);
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            const plumeDamp = damp(0.93, dt);
+            p.vx = p.vx * plumeDamp + wxA * dt;
+            p.vy = p.vy * plumeDamp + wyA * dt;
+            p.size *= damp(1.038, dt);
+            p.life -= 0.043 * dt;
+            p.phase += dt;
             if (p.life > 0) flamePlumes[writeI++] = p;
         }
         flamePlumes.length = writeI;
@@ -2405,11 +2492,12 @@ function update() {
         let writeI = 0;
         for (let i = 0; i < sparks.length; i++) {
             const p = sparks[i];
-            p.x += p.vx;
-            p.y += p.vy;
-            p.vy += 0.07;          // gravity arcs them back down
-            p.vx *= 0.96;
-            p.life -= 0.028;
+            rememberPos(p);
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.vy += 0.07 * dt;          // gravity arcs them back down
+            p.vx *= damp(0.96, dt);
+            p.life -= 0.028 * dt;
             if (p.life > 0) sparks[writeI++] = p;
         }
         sparks.length = writeI;
@@ -2423,13 +2511,15 @@ function update() {
         let writeI = 0;
         for (let i = 0; i < embers.length; i++) {
             const p = embers[i];
-            p.x += p.vx;
-            p.y += p.vy;
-            p.vx = p.vx * 0.94 + wxA;
-            p.vy = p.vy * 0.94 + wyA;
-            p.life -= 0.022;
+            rememberPos(p);
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            const emberDamp = damp(0.94, dt);
+            p.vx = p.vx * emberDamp + wxA * dt;
+            p.vy = p.vy * emberDamp + wyA * dt;
+            p.life -= 0.022 * dt;
             if (p.life > 0) {
-                if (Math.random() < igniteChance) {
+                if (Math.random() < igniteChance * dt) {
                     const cx = (p.x / cell) | 0;
                     const cy = (p.y / cell) | 0;
                     if (cx >= 0 && cx < cols && cy >= 0 && cy < rows) {
@@ -2444,7 +2534,7 @@ function update() {
 
     // Wind streaks (subtle ground-level dust trails in wind direction)
     if (props.showWindParticles && props.windStrength > 0.05) {
-        if (windStreaks.length < (MAX_WIND_PARTS * qMul) | 0 && Math.random() < 0.5) {
+        if (windStreaks.length < (MAX_WIND_PARTS * qMul) | 0 && Math.random() < 0.5 * dt) {
             const w = worldPxW, h = worldPxH;
             let x, y;
             if (Math.abs(wxF) > Math.abs(wyF)) {
@@ -2466,9 +2556,10 @@ function update() {
         let writeI = 0;
         for (let i = 0; i < windStreaks.length; i++) {
             const p = windStreaks[i];
-            p.x += wxF * p.speed * props.windStrength;
-            p.y += wyF * p.speed * props.windStrength;
-            p.life -= 0.005;
+            rememberPos(p);
+            p.x += wxF * p.speed * props.windStrength * dt;
+            p.y += wyF * p.speed * props.windStrength * dt;
+            p.life -= 0.005 * dt;
             if (p.life > 0 && p.x > minX && p.x < maxX && p.y > minY && p.y < maxY) {
                 windStreaks[writeI++] = p;
             }
@@ -2810,17 +2901,20 @@ function render() {
     // Blit only the visible region of the (large) world ground canvas — cheap.
     drawWorldLayer(staticCanvas, camX, camY, w, h);
 
-    // Cheap water sparkles + ripple bands (animated on top of baked water)
+    // Cheap water sparkles + ripple bands (animated on top of baked water).
+    // Sample only the VISIBLE cell window so every sample can land on screen
+    // (keeps the intended sparkle density regardless of map size).
     {
-        const n = grid.length;
-        // Wave-band animation: dim a sine band that travels across the canvas
-        const bandPhase = (frame * 0.012) % (Math.PI * 2);
-        // Sample ~36 random cells per frame for sparkles
+        const bandPhase = (renderTimeSec * 0.72) % (Math.PI * 2);
+        const wx0 = Math.max(0, (camX / cell) | 0);
+        const wy0 = Math.max(0, (camY / cell) | 0);
+        const wcw = Math.min(cols - wx0, Math.ceil(w / cell) + 1);
+        const wch = Math.min(rows - wy0, Math.ceil(h / cell) + 1);
         for (let k = 0; k < 36; k++) {
-            const i = (Math.random() * n) | 0;
+            const x = wx0 + ((Math.random() * wcw) | 0);
+            const y = wy0 + ((Math.random() * wch) | 0);
+            const i = y * cols + x;
             if (grid[i] !== WATER) continue;
-            const y = (i / cols) | 0;
-            const x = i - y * cols;
             const sx = x * cell + ((Math.random() * cell) | 0);
             const sy = y * cell + ((Math.random() * cell) | 0);
             // Brighter sparkle where sine band peaks
@@ -2836,9 +2930,10 @@ function render() {
     if (props.showFish && fishList.length) {
         ctx.fillStyle = "rgba(8,24,32,0.42)";
         for (const f of fishList) {
+            const fx = drawX(f), fy = drawY(f);
             const wag = Math.sin(f.wob) * 0.4 * f.size;
             ctx.save();
-            ctx.translate(f.x, f.y);
+            ctx.translate(fx, fy);
             ctx.rotate(f.ang);
             ctx.beginPath();                                   // body
             ctx.ellipse(0, 0, f.size, f.size * 0.42, 0, 0, Math.PI * 2);
@@ -2859,19 +2954,26 @@ function render() {
         const wyF = Math.sin(windAngle);
         ctx.lineWidth = 1.3;
         for (const p of windStreaks) {
+            const px = drawX(p), py = drawY(p);
             const a = p.life * 0.30;
             ctx.strokeStyle = `rgba(240,215,185,${a.toFixed(3)})`;
             ctx.beginPath();
-            ctx.moveTo(p.x, p.y);
-            ctx.lineTo(p.x - wxF * p.len, p.y - wyF * p.len);
+            ctx.moveTo(px, py);
+            ctx.lineTo(px - wxF * p.len, py - wyF * p.len);
             ctx.stroke();
         }
     }
 
-    // Per-frame smoulder glow on hot ash (fades as the ash cools toward charred)
-    for (let y = 0; y < rows; y++) {
+    // Per-frame smoulder glow on hot ash (fades as the ash cools toward charred).
+    // Visible cell window only — off-screen glow can't be seen.
+    {
+    const sx0 = Math.max(0, (camX / cell) | 0);
+    const sx1 = Math.min(cols - 1, Math.ceil((camX + w) / cell));
+    const sy0 = Math.max(0, (camY / cell) | 0);
+    const sy1 = Math.min(rows - 1, Math.ceil((camY + h) / cell));
+    for (let y = sy0; y <= sy1; y++) {
         const rowBase = y * cols;
-        for (let x = 0; x < cols; x++) {
+        for (let x = sx0; x <= sx1; x++) {
             const i = rowBase + x;
             const s = grid[i];
             if (s !== ASH_TREE && s !== ASH_GRASS) continue;
@@ -2887,6 +2989,7 @@ function render() {
             }
         }
     }
+    }
 
     // Glowing-mushroom halos — soft cyan pulse at ground level (below trees, so a
     // canopy occludes one beneath it). Brighter when the scene is dark/wet.
@@ -2895,7 +2998,7 @@ function render() {
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
         for (const s of glowSpots) {
-            const pulse = 0.55 + Math.sin(frame * 0.05 + s.phase) * 0.45;
+            const pulse = 0.55 + Math.sin(renderTimeSec * 3.0 + s.phase) * 0.45;
             const a = pulse * 0.24 * moodBoost;          // much subtler than before
             const rr = s.r * 0.7;                          // smaller halo
             const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, rr);
@@ -2915,14 +3018,15 @@ function render() {
         ctx.save();
         ctx.globalCompositeOperation = "multiply";
         for (const c of clouds) {
+            const cx = drawX(c), cy = drawY(c);
             // Radial gradient shadow
-            const grad = ctx.createRadialGradient(c.x, c.y, c.size * 0.20, c.x, c.y, c.size);
+            const grad = ctx.createRadialGradient(cx, cy, c.size * 0.20, cx, cy, c.size);
             const a = c.opacity.toFixed(3);
             grad.addColorStop(0, `rgba(40,40,55,${a})`);
             grad.addColorStop(1, "rgba(80,80,95,0)");
             ctx.fillStyle = grad;
             ctx.beginPath();
-            ctx.arc(c.x, c.y, c.size, 0, Math.PI * 2);
+            ctx.arc(cx, cy, c.size, 0, Math.PI * 2);
             ctx.fill();
         }
         ctx.restore();
@@ -2942,29 +3046,52 @@ function render() {
     }
     if (treeLayerCountdown <= 0) {
         const tlc = treeLayerCtx;
-        tlc.clearRect(0, 0, worldPxW, worldPxH);
+        // Rebuild ONLY the visible region (+ margin for sprite overhang and the
+        // few px the camera can pan between rebuilds). Off-screen areas stay
+        // stale and get refreshed before they scroll into view — this is the
+        // single biggest frame-time saving in the whole wallpaper.
+        const maxDw = treeScaledCellW, maxDh = treeScaledCellH;
+        const MX = (maxDw >> 1) + 64, MY = maxDh + 64;
+        const rx0 = Math.max(0, (camX - MX) | 0);
+        const ry0 = Math.max(0, (camY - MY) | 0);
+        const rx1 = Math.min(worldPxW, (camX + w + MX) | 0);
+        const ry1 = Math.min(worldPxH, (camY + h + MY) | 0);
+        tlc.save();
+        tlc.beginPath();
+        tlc.rect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+        tlc.clip();
+        tlc.clearRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+
         const swayScale = Math.min(1.4, props.windStrength) * cell * 0.10;
         const swayWxF = Math.cos(windAngle);
-        const swayT = frame * 0.05;
-        const ts = props.treeScale;
-        for (let y = 0; y < rows; y++) {
+        const swayT = renderTimeSec * 3.0;
+        // Cell bounds for every tree whose sprite can reach into the region
+        const cx0 = Math.max(0, ((rx0 - maxDw / 2 - cell) / cell) | 0);
+        const cx1 = Math.min(cols - 1, Math.ceil((rx1 + maxDw / 2 + cell) / cell));
+        const cy0 = Math.max(0, ((ry0 - cell) / cell) | 0);
+        const cy1 = Math.min(rows - 1, Math.ceil((ry1 + maxDh + cell) / cell));
+        const B1 = TREE_SIZE_BUCKETS - 1;
+        for (let y = cy0; y <= cy1; y++) {
             const rowBase = y * cols;
-            for (let x = 0; x < cols; x++) {
+            for (let x = cx0; x <= cx1; x++) {
                 const i = rowBase + x;
                 const s = grid[i];
                 if (s !== TREE && s !== BURN_TREE) continue;
                 const phase = swayT + (treeVar[i] * 0.4) + ((i & 31) * 0.21);
                 const swX = swayWxF * Math.sin(phase) * swayScale;
                 const g = treeGrowth[i] || 1;
-                const scale = (0.30 + g * 0.70) * ts;
-                const dw = treeSpW * scale;
-                const dh = treeSpH * scale;
+                // Pre-scaled bucket → unscaled integer blit (fast + crisp)
+                const b = (g * B1 + 0.5) | 0;
+                const dw = treeScaledW[b];
+                const dh = treeScaledH[b];
                 const baseX = x * cell + cell * 0.5 + jitterX[i] * 0.7 + swX;
                 const baseY = y * cell + cell * 0.92 + jitterY[i] * 0.4;
-                tlc.drawImage(treeSprites, treeVar[i] * treeSpW, 0, treeSpW, treeSpH,
-                              baseX - dw * 0.5, baseY - dh, dw, dh);
+                tlc.drawImage(treeScaled,
+                              treeVar[i] * treeScaledCellW, b * treeScaledCellH, dw, dh,
+                              (baseX - dw * 0.5 + 0.5) | 0, (baseY - dh + 0.5) | 0, dw, dh);
             }
         }
+        tlc.restore();
         treeLayerCountdown = TREE_LAYER_GAP;
     }
     treeLayerCountdown--;
@@ -2977,10 +3104,18 @@ function render() {
     // Track the fire's pixel bounding box for the heat-shimmer pass.
     let fbX0 = 1e9, fbY0 = 1e9, fbX1 = -1e9, fbY1 = -1e9;
     if (burningCount > 0) {
-        glowCtx.clearRect(0, 0, worldPxW, worldPxH);
-        for (let y = 0; y < rows; y++) {
+        // Only the visible region matters: off-screen glow is never composited,
+        // so scan/draw/clear just the on-screen cell window (+ a glow margin).
+        const gPad = 48;
+        const vx0 = Math.max(0, ((camX - gPad) / cell) | 0);
+        const vx1 = Math.min(cols - 1, Math.ceil((camX + w + gPad) / cell));
+        const vy0 = Math.max(0, ((camY - gPad) / cell) | 0);
+        const vy1 = Math.min(rows - 1, Math.ceil((camY + h + gPad) / cell));
+        glowCtx.clearRect(Math.max(0, camX - gPad), Math.max(0, camY - gPad),
+                          w + gPad * 2, h + gPad * 2);
+        for (let y = vy0; y <= vy1; y++) {
             const rowBase = y * cols;
-            for (let x = 0; x < cols; x++) {
+            for (let x = vx0; x <= vx1; x++) {
                 const i = rowBase + x;
                 const s = grid[i];
                 if (s !== BURN_GRASS && s !== BURN_TREE) continue;
@@ -3086,6 +3221,7 @@ function render() {
         const SEGS = 5;
         const windLean = Math.cos(windAngle) * props.windStrength;
         for (const p of flamePlumes) {
+            const px = drawX(p), py = drawY(p);
             const a = p.life;
             const hot = p.hot || 0;
             const kind = p.kind || 0;
@@ -3099,11 +3235,11 @@ function render() {
             const flick = 0.72 + 0.28 * Math.sin(p.phase);
             for (let sgi = 0; sgi < SEGS; sgi++) {
                 const t = sgi / (SEGS - 1);                 // 0 base → 1 tip
-                const segY = p.y - tongueH * t;
+                const segY = py - tongueH * t;
                 // dancing waver + a wind-driven curl that grows toward the tip
                 const waver = Math.sin(p.phase * 0.6 + t * 3.4) * p.size * 0.5 * t * curlMul;
                 const curl  = (p.curl + windLean * 0.8) * p.size * t * t * curlMul;
-                const segX = p.x + waver + curl;
+                const segX = px + waver + curl;
                 const segR = Math.max(0.5, p.size * wMul * (1.0 - t * taper));
                 const alpha = a * (0.42 - t * 0.12) * flick;
                 if (alpha <= 0) continue;
@@ -3140,11 +3276,12 @@ function render() {
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
         for (const p of sparks) {
+            const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
-            const tw = 0.55 + 0.45 * Math.sin(frame * 0.9 + p.x);   // fast twinkle
+            const tw = 0.55 + 0.45 * Math.sin(renderTimeSec * 54 + px);   // fast twinkle
             ctx.fillStyle = `rgba(255,${(220 + a * 35) | 0},${(140 * a) | 0},${(a * tw).toFixed(3)})`;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
         }
         ctx.restore();
@@ -3157,24 +3294,25 @@ function render() {
         ctx.globalCompositeOperation = "lighter";
         ctx.lineCap = "round";
         for (const p of embers) {
+            const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
-            const tw = 0.7 + 0.3 * Math.sin((p.phase || 0) + frame * 0.18); // soft pulse
+            const tw = 0.7 + 0.3 * Math.sin((p.phase || 0) + renderTimeSec * 10.8); // soft pulse
             // soft glow halo
             ctx.fillStyle = `rgba(255,${(130 + a * 70) | 0},${(40 * a) | 0},${(a * 0.16 * tw).toFixed(3)})`;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, p.size * 3.4, 0, Math.PI * 2);
+            ctx.arc(px, py, p.size * 3.4, 0, Math.PI * 2);
             ctx.fill();
             // comet trail
             ctx.lineWidth = p.size * 0.9;
             ctx.strokeStyle = `rgba(255,${(120 + a * 100) | 0},${(20 * a) | 0},${(a * 0.45).toFixed(3)})`;
             ctx.beginPath();
-            ctx.moveTo(p.x - p.vx * 2.4, p.y - p.vy * 2.4);
-            ctx.lineTo(p.x, p.y);
+            ctx.moveTo(px - p.vx * 2.4, py - p.vy * 2.4);
+            ctx.lineTo(px, py);
             ctx.stroke();
             // bright core
             ctx.fillStyle = `rgba(255,${(225 + a * 30) | 0},${(160 * a) | 0},${(a * tw).toFixed(3)})`;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
         }
         ctx.restore();
@@ -3212,8 +3350,8 @@ function render() {
             for (let yy = 0; yy < rh; yy += bandH) {
                 const ny = top + yy;
                 const rise = 0.35 + 0.65 * (1 - yy / rh);
-                const dx = Math.sin(ny * 0.22 + frame * 0.22) * amp * rise
-                         + Math.sin(ny * 0.5 - frame * 0.13) * amp * 0.4 * rise;
+                const dx = Math.sin(ny * 0.22 + renderTimeSec * 13.2) * amp * rise
+                         + Math.sin(ny * 0.5 - renderTimeSec * 7.8) * amp * 0.4 * rise;
                 ctx.drawImage(hazeCanvas, 0, yy, rw, bandH, x0 + dx, ny, rw, bandH);
             }
         }
@@ -3222,11 +3360,12 @@ function render() {
     // Smoke (above fire, below leaves) — per-particle shade for variety
     if (props.showSmoke && smokeParticles.length) {
         for (const p of smokeParticles) {
+            const px = drawX(p), py = drawY(p);
             const a = (p.life * 0.14).toFixed(3);
             const s = p.shade | 0;
             ctx.fillStyle = `rgba(${s},${(s * 0.95) | 0},${(s * 0.88) | 0},${a})`;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
         }
     }
@@ -3236,17 +3375,18 @@ function render() {
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
         for (const f of fireflies) {
+            const fx = drawX(f), fy = drawY(f);
             const pulse = 0.45 + Math.sin(f.phase) * 0.45;
             const a = pulse * f.life;
             // Halo (smaller, fainter — keeps the spotlight on the fire)
             ctx.fillStyle = `rgba(220,255,140,${(a * 0.10).toFixed(3)})`;
             ctx.beginPath();
-            ctx.arc(f.x, f.y, f.size * 2.4, 0, Math.PI * 2);
+            ctx.arc(fx, fy, f.size * 2.4, 0, Math.PI * 2);
             ctx.fill();
             // Core
             ctx.fillStyle = `rgba(240,255,170,${(a * 0.7).toFixed(3)})`;
             ctx.beginPath();
-            ctx.arc(f.x, f.y, f.size, 0, Math.PI * 2);
+            ctx.arc(fx, fy, f.size, 0, Math.PI * 2);
             ctx.fill();
         }
         ctx.restore();
@@ -3255,11 +3395,12 @@ function render() {
     // Ambient leaves (above smoke for that drifting feel)
     if (leaves.length) {
         for (const p of leaves) {
+            const px = drawX(p), py = drawY(p);
             const a = (p.life * 0.7).toFixed(2);
             const [r, g, b] = p.color;
             ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
             ctx.beginPath();
-            ctx.ellipse(p.x, p.y, p.size * 1.5, p.size * 0.55, p.rot, 0, Math.PI * 2);
+            ctx.ellipse(px, py, p.size * 1.5, p.size * 0.55, p.rot, 0, Math.PI * 2);
             ctx.fill();
         }
     }
@@ -3269,12 +3410,13 @@ function render() {
         ctx.strokeStyle = "rgba(18,12,8,0.85)";
         ctx.lineCap = "round";
         for (const b of birds) {
+            const bx = drawX(b), by = drawY(b);
             const wing = Math.abs(Math.sin(b.flap)) * 0.55 + 0.45;
             ctx.lineWidth = b.size * 0.8;
             ctx.beginPath();
-            ctx.moveTo(b.x - b.size * 2.5, b.y - b.size * wing);
-            ctx.lineTo(b.x, b.y);
-            ctx.lineTo(b.x + b.size * 2.5, b.y - b.size * wing);
+            ctx.moveTo(bx - b.size * 2.5, by - b.size * wing);
+            ctx.lineTo(bx, by);
+            ctx.lineTo(bx + b.size * 2.5, by - b.size * wing);
             ctx.stroke();
         }
     }
@@ -3285,13 +3427,14 @@ function render() {
         ctx.lineWidth = 1.2;
         ctx.lineCap = "round";
         for (const r of rainDrops) {
+            const rx = drawX(r), ry = drawY(r);
             // Direction = velocity (normalized × streak length)
             const sp = Math.hypot(r.vx, r.vy) || 1;
             const dx = (r.vx / sp) * r.len;
             const dy = (r.vy / sp) * r.len;
             ctx.beginPath();
-            ctx.moveTo(r.x, r.y);
-            ctx.lineTo(r.x - dx, r.y - dy);
+            ctx.moveTo(rx, ry);
+            ctx.lineTo(rx - dx, ry - dy);
             ctx.stroke();
         }
     }
@@ -3381,7 +3524,7 @@ function render() {
         debugEl.style.display = "block";
         const wMode = WEATHER_NAMES[weatherCurrent] || "?";
         debugEl.textContent =
-            `fps=${avgFps.toFixed(0)}  frame=${frame}  static=${staticDirty?"dirty":"clean"}\n` +
+            `fps=${avgFps.toFixed(0)}  sim=${SIM_HZ}Hz  frame=${frame}  static=${staticDirty?"dirty":"clean"}\n` +
             `burn=${burningCount}  smoke=${smokeParticles.length}  embers=${embers.length}  ` +
             `plumes=${flamePlumes.length}  rain=${rainDrops.length}\n` +
             `leaves=${leaves.length}  fireflies=${fireflies.length}  birds=${birds.length}  ` +
@@ -3410,6 +3553,7 @@ function loop() {
         return;
     }
     lastRenderMs = now;
+    renderTimeSec = now * 0.001;
     frame++;
 
     // FPS tracking (exponential moving average)
@@ -3445,8 +3589,8 @@ function loop() {
         props.autoIgnite ||
         (props.showWindParticles && props.windStrength > 0.05);
 
-    // Fixed-timestep simulation: 30 ticks/sec independent of render FPS.
-    // Lets us cap rendering at 60 or run at 120+ without overspeeding the sim.
+    // Fixed-timestep simulation: 60 visual ticks/sec independent of render FPS.
+    // Constants are scaled from the old 30Hz tuning so gameplay pacing stays intact.
     if (lastSimMs === 0) lastSimMs = now;
     if (isActive) {
         let iters = 0;
@@ -3459,8 +3603,10 @@ function loop() {
         if (now - lastSimMs > SIM_TICK_MS * MAX_SIM_PER_FRAME * 2) {
             lastSimMs = now;
         }
+        simAlpha = Math.max(0, Math.min(1, (now - lastSimMs) / SIM_TICK_MS));
     } else {
         lastSimMs = now; // stay in sync while idle so we don't burst on resume
+        simAlpha = 1;
     }
 
     render();
@@ -3527,12 +3673,16 @@ function applyProperty(key, raw) {
         case "rainScatter":
         case "rgbEdgeStrength":
         case "audioIntensity":
-        case "treeScale":
         case "magicFire":
         case "panX":
         case "panY":
         case "panSpeed":
             props[key] = Number(v);
+            break;
+        case "treeScale":
+            props.treeScale = Number(v);
+            buildScaledTreeAtlas();   // rebake the pre-scaled tree sizes
+            treeLayerCountdown = 0;
             break;
         case "worldSize":
             props.worldSize = Math.max(1, Number(v) || 1);
