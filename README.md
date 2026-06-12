@@ -103,6 +103,11 @@ Comfortable at 60 / 120 / 144 fps on modest hardware. The wallpaper defaults to
 a 120 fps cap so high-refresh desktops get smoother motion, while the sim keeps
 fire spread, weather, regrowth and particle lifetimes at the same gameplay pace.
 
+Measured frame times (1.5× world, ~1080p): **idle forest ~3.3 ms**, an active
+wildfire ~4.7 ms, a calm forest with no wind ~1.6 ms, and a worst-case 700+ cell
+inferno ~9 ms — all inside the 120 fps budget, with most of the day spent far
+under it. Sim ticks run in well under 0.2 ms.
+
 Key optimizations:
 - **Two-tier baked layers**: the worldgen-static terrain (dirt, smooth water,
   paths, lily pads, rocks, grass) is baked once per world; the per-fire static
@@ -113,9 +118,19 @@ Key optimizations:
   trees 1:1 from a pre-scaled 20-bucket size atlas instead of scaling every
   drawImage (this alone cut typical frame time ~4×, and integer-snapped blits
   render the pixel-art trees crisper too)
+- **Event-driven tree refreshes** — the sway is sampled from a 320-entry table
+  every 2nd frame; when the wind is calm the layer only rebuilds on an actual
+  change (a tree burns down, a sapling sprouts, the camera moves), so a still
+  forest costs almost nothing to redraw
 - **Visible-window effect passes** — fire glow, ash smoulder glow and water
   sparkles scan/draw only the on-screen cells; off-screen fire still simulates
   but costs no draw time
+- **No per-frame string garbage** — the thousands of flame/ember/smoke/glow
+  fills reuse interned `rgb()` strings (colour quantized to 16 levels, exact
+  opacity via `globalAlpha`) instead of building `rgba(…)` strings every draw,
+  eliminating the GC pauses that caused periodic micro-stutters
+- **Half-resolution fire-glow blur** — the bloom is blurred at half size and
+  upscaled, a quarter of the blur work for the same soft glow
 - **Strided regrowth** — the full-grid ash/regrowth pass visits ¼ of the cells
   per tick at 4× rates (statistically identical, quarter the scan cost)
 - Opaque (`alpha:false`) main canvas + the world-sized scratch canvas kept out

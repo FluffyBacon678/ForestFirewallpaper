@@ -298,7 +298,24 @@ let regrowPhase = 0;   // rotating 0..3 offset for the strided regrowth pass
 let camX = 0, camY = 0;
 let worldPxW = 0, worldPxH = 0;   // world size in pixels (cols*cell, rows*cell)
 
+// Cached colour strings for the hot particle loops. Building thousands of
+// rgba(...) template strings per frame causes GC churn (periodic stutters);
+// instead we quantize r/g/b to 16 levels (≤8/255 error — invisible in additive
+// blending), reuse interned "rgb(...)" strings, and pass the EXACT alpha via
+// ctx.globalAlpha so opacity is never quantized.
+const colorCache = [];
+function rgbQ(r, g, b) {
+    if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
+    const key = ((r & 0xF0) << 4) | (g & 0xF0) | (b >> 4);
+    let s = colorCache[key];
+    if (s === undefined) {
+        s = colorCache[key] = "rgb(" + ((r & 0xF0) + 8) + "," + ((g & 0xF0) + 8) + "," + ((b & 0xF0) + 8) + ")";
+    }
+    return s;
+}
+
 let glowCanvas, glowCtx;
+let glowHalf = null, glowHalfCtx = null; // half-res scratch for the glow blur
 let hazeCanvas = null, hazeCtx = null;   // scratch buffer for heat-shimmer distortion
 let treeSprites = null;
 let grassSprites = null;
@@ -306,7 +323,12 @@ let grassSprites = null;
 // frame, so they're rendered into this offscreen canvas and rebuilt only every
 // few frames (the per-tree sway is slow enough that this looks smooth).
 let treeLayerCanvas = null, treeLayerCtx = null, treeLayerCountdown = 0;
-const TREE_LAYER_GAP = 1; // rebuild every render so tree sway stays smooth at 60fps+
+let treeLayerCamX = 0, treeLayerCamY = 0;       // camera pos at last rebuild (jump guard)
+const treeSinTab = new Float32Array(320);       // per-rebuild sway offsets (treeVar × i&31)
+// Sway is a ~1px, ~2s oscillation drawn at integer positions — sampling it every
+// 2nd frame (30Hz at 60fps, 60Hz at 120fps) is visually identical to every frame
+// and halves the biggest recurring render cost.
+const TREE_LAYER_GAP = 2;
 let treeSpW = 0, treeSpH = 0;
 let grassSpW = 0, grassSpH = 0;
 // Per-cell positional jitter (broken-grid look)
@@ -1936,6 +1958,7 @@ function updateRain(dt) {
                             burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;
                             burningCount--;
                             markStaticDirty();
+                            if (isTree) treeLayerCountdown = 0;   // tree vanished → refresh layer
                             // Steam puff
                             if (smokeParticles.length < MAX_SMOKE) {
                                 smokeParticles.push({
@@ -2097,6 +2120,7 @@ function update(dt = SIM_DT) {
             fireHeat[i] = 0;
             burningCount--;
             markStaticDirty(); // grass tuft → ash patch baked
+            if (isTree) treeLayerCountdown = 0;   // tree vanished → refresh layer
             continue;
         }
 
@@ -2294,6 +2318,7 @@ function update(dt = SIM_DT) {
                     grid[i] = TREE;
                     treeVar[i] = pickTreeVariant();
                     treeGrowth[i] = 0.12 + Math.random() * 0.08; // starts as a sapling
+                    treeLayerCountdown = 0;   // new sapling → refresh layer
                     // grass tuft already baked under the new tree — no terrain edit needed
                 }
             }
@@ -2982,13 +3007,15 @@ function render() {
             if (Math.random() < 0.5) {
                 const ax = x * cell + cell * 0.5 + jitterX[i];
                 const ay = y * cell + cell * 0.5 + jitterY[i];
-                ctx.fillStyle = `rgba(255,90,25,${(heat * 0.6).toFixed(2)})`;
+                ctx.fillStyle = "rgb(255,90,25)";
+                ctx.globalAlpha = heat * 0.6;
                 ctx.beginPath();
                 ctx.arc(ax, ay, Math.max(1, cell * 0.16), 0, Math.PI * 2);
                 ctx.fill();
             }
         }
     }
+    ctx.globalAlpha = 1;
     }
 
     // Glowing-mushroom halos — soft cyan pulse at ground level (below trees, so a
@@ -3044,27 +3071,36 @@ function render() {
         treeLayerCanvas.width = worldPxW; treeLayerCanvas.height = worldPxH;
         treeLayerCountdown = 0;
     }
+    // If a slider jump teleports the camera further than the rebuild margin,
+    // refresh immediately so no blank strip can reach the screen.
+    if (Math.abs(camX - treeLayerCamX) > 48 || Math.abs(camY - treeLayerCamY) > 48) {
+        treeLayerCountdown = 0;
+    }
     if (treeLayerCountdown <= 0) {
         const tlc = treeLayerCtx;
-        // Rebuild ONLY the visible region (+ margin for sprite overhang and the
-        // few px the camera can pan between rebuilds). Off-screen areas stay
-        // stale and get refreshed before they scroll into view — this is the
-        // single biggest frame-time saving in the whole wallpaper.
+        // Full-canvas clear (one cheap GPU fill), then draw ONLY the trees that
+        // can reach the visible window (+ margin). No clip state — clipping
+        // forces slow paths in some canvas backends. Off-screen stays blank;
+        // the margin + the jump guard above keep blanks off the screen.
+        tlc.clearRect(0, 0, worldPxW, worldPxH);
+        tlc.imageSmoothingEnabled = false;   // 1:1 blits — no resampling needed
+        treeLayerCamX = camX; treeLayerCamY = camY;
+
         const maxDw = treeScaledCellW, maxDh = treeScaledCellH;
         const MX = (maxDw >> 1) + 64, MY = maxDh + 64;
         const rx0 = Math.max(0, (camX - MX) | 0);
         const ry0 = Math.max(0, (camY - MY) | 0);
         const rx1 = Math.min(worldPxW, (camX + w + MX) | 0);
         const ry1 = Math.min(worldPxH, (camY + h + MY) | 0);
-        tlc.save();
-        tlc.beginPath();
-        tlc.rect(rx0, ry0, rx1 - rx0, ry1 - ry0);
-        tlc.clip();
-        tlc.clearRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
 
         const swayScale = Math.min(1.4, props.windStrength) * cell * 0.10;
         const swayWxF = Math.cos(windAngle);
         const swayT = renderTimeSec * 3.0;
+        // Sway phases only depend on (treeVar, i&31): 320 combos — precompute
+        // the final x-offsets once instead of a Math.sin per tree.
+        for (let k = 0; k < 320; k++) {
+            treeSinTab[k] = swayWxF * Math.sin(swayT + (k >> 5) * 0.4 + (k & 31) * 0.21) * swayScale;
+        }
         // Cell bounds for every tree whose sprite can reach into the region
         const cx0 = Math.max(0, ((rx0 - maxDw / 2 - cell) / cell) | 0);
         const cx1 = Math.min(cols - 1, Math.ceil((rx1 + maxDw / 2 + cell) / cell));
@@ -3077,8 +3113,8 @@ function render() {
                 const i = rowBase + x;
                 const s = grid[i];
                 if (s !== TREE && s !== BURN_TREE) continue;
-                const phase = swayT + (treeVar[i] * 0.4) + ((i & 31) * 0.21);
-                const swX = swayWxF * Math.sin(phase) * swayScale;
+                const tv = treeVar[i];
+                const swX = treeSinTab[(tv << 5) | (i & 31)];
                 const g = treeGrowth[i] || 1;
                 // Pre-scaled bucket → unscaled integer blit (fast + crisp)
                 const b = (g * B1 + 0.5) | 0;
@@ -3087,12 +3123,14 @@ function render() {
                 const baseX = x * cell + cell * 0.5 + jitterX[i] * 0.7 + swX;
                 const baseY = y * cell + cell * 0.92 + jitterY[i] * 0.4;
                 tlc.drawImage(treeScaled,
-                              treeVar[i] * treeScaledCellW, b * treeScaledCellH, dw, dh,
+                              tv * treeScaledCellW, b * treeScaledCellH, dw, dh,
                               (baseX - dw * 0.5 + 0.5) | 0, (baseY - dh + 0.5) | 0, dw, dh);
             }
         }
-        tlc.restore();
-        treeLayerCountdown = TREE_LAYER_GAP;
+        // Calm wind = snapped sway is permanently 0, so the layer only changes
+        // when trees change or the camera moves: drop to a slow fallback cadence
+        // (tree changes below and the camera jump-guard force instant refreshes).
+        treeLayerCountdown = (swayScale < 0.5) ? 30 : TREE_LAYER_GAP;
     }
     treeLayerCountdown--;
     drawWorldLayer(treeLayerCanvas, camX, camY, w, h);
@@ -3152,12 +3190,14 @@ function render() {
 
                 if (mGlow) {
                     const mc = MAGIC_FIRE[mGlow - 1];
-                    glowCtx.fillStyle = `rgba(${mc[0]},${mc[1]},${mc[2]},${(0.5 + intensity * 0.3).toFixed(2)})`;
+                    glowCtx.fillStyle = rgbQ(mc[0], mc[1], mc[2]);
+                    glowCtx.globalAlpha = 0.5 + intensity * 0.3;
                     glowCtx.beginPath();
                     glowCtx.arc(cxP, cyP, flameR, 0, Math.PI * 2);
                     glowCtx.fill();
                     // lighter inner
-                    glowCtx.fillStyle = `rgba(${(mc[0]+90>255?255:mc[0]+90)},${(mc[1]+60>255?255:mc[1]+60)},${(mc[2]+60>255?255:mc[2]+60)},${(0.4 + intensity*0.35).toFixed(2)})`;
+                    glowCtx.fillStyle = rgbQ(mc[0] + 90, mc[1] + 60, mc[2] + 60);
+                    glowCtx.globalAlpha = 0.4 + intensity * 0.35;
                     glowCtx.beginPath();
                     glowCtx.arc(cxP, cyP, flameR * 0.5, 0, Math.PI * 2);
                     glowCtx.fill();
@@ -3165,7 +3205,8 @@ function render() {
                     // Outer flame — dark ember-red when smoldering, orange at blaze
                     const oG = (60 + intensity * 130 + heat * 40) | 0;
                     const oB = (10 + hot * 70) | 0;
-                    glowCtx.fillStyle = `rgba(255,${oG},${oB},${(0.55 + intensity * 0.30).toFixed(2)})`;
+                    glowCtx.fillStyle = rgbQ(255, oG, oB);
+                    glowCtx.globalAlpha = 0.55 + intensity * 0.30;
                     glowCtx.beginPath();
                     glowCtx.arc(cxP, cyP, flameR, 0, Math.PI * 2);
                     glowCtx.fill();
@@ -3173,13 +3214,15 @@ function render() {
                     // Inner core — warm amber
                     const iG = (150 + hot * 70) | 0;
                     const iB = (45 + hot * 90) | 0;
-                    glowCtx.fillStyle = `rgba(255,${iG},${iB},${(0.40 + intensity * 0.35).toFixed(2)})`;
+                    glowCtx.fillStyle = rgbQ(255, iG, iB);
+                    glowCtx.globalAlpha = 0.40 + intensity * 0.35;
                     glowCtx.beginPath();
                     glowCtx.arc(cxP, cyP, flameR * 0.5, 0, Math.PI * 2);
                     glowCtx.fill();
                 }
             }
         }
+        glowCtx.globalAlpha = 1;   // reset for the next frame's clear/draws
 
         // Composite only the fire's bounding region (with padding for the blur
         // spread) so the glow blur cost stays proportional to the fire size, not
@@ -3194,11 +3237,25 @@ function render() {
             if (props.fireGlow > 0) {
                 const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
                 const glowAmt = props.fireGlow * audioBoost;
+                // Half-resolution blur: downscale the glow region 2×, blur at
+                // half the radius, and let the upscale smooth it back out —
+                // same soft bloom for a quarter of the blur work.
+                const hw = Math.max(1, gw >> 1), hh = Math.max(1, gh >> 1);
+                if (!glowHalf) { glowHalf = document.createElement("canvas"); glowHalfCtx = glowHalf.getContext("2d"); }
+                if (glowHalf.width < hw || glowHalf.height < hh) {
+                    glowHalf.width = Math.max(glowHalf.width, hw);
+                    glowHalf.height = Math.max(glowHalf.height, hh);
+                }
+                glowHalfCtx.clearRect(0, 0, hw, hh);
+                glowHalfCtx.save();
+                glowHalfCtx.filter = `blur(${(5.5 * glowAmt).toFixed(1)}px)`;
+                glowHalfCtx.drawImage(glowCanvas, gx0, gy0, gw, gh, 0, 0, hw, hh);
+                glowHalfCtx.restore();
                 ctx.save();
-                ctx.filter = `blur(${(11 * glowAmt).toFixed(1)}px)`;
                 ctx.globalAlpha = Math.min(1, 0.5 * glowAmt);
                 ctx.globalCompositeOperation = "screen";
-                ctx.drawImage(glowCanvas, gx0, gy0, gw, gh, gx0, gy0, gw, gh);
+                ctx.imageSmoothingEnabled = true;
+                ctx.drawImage(glowHalf, 0, 0, hw, hh, gx0, gy0, gw, gh);
                 ctx.restore();
             }
             // A touch of the sharp glow for the embers/core, kept low
@@ -3262,7 +3319,8 @@ function render() {
                     b = (6 + Math.pow(t, 2.6) * 215 + hot * 70) | 0;
                     if (g > 255) g = 255; if (b > 255) b = 255;
                 }
-                ctx.fillStyle = `rgba(${r},${g},${b},${segAlpha.toFixed(3)})`;
+                ctx.fillStyle = rgbQ(r, g, b);
+                ctx.globalAlpha = segAlpha > 1 ? 1 : segAlpha;
                 ctx.beginPath();
                 ctx.arc(segX, segY, segR, 0, Math.PI * 2);
                 ctx.fill();
@@ -3279,7 +3337,8 @@ function render() {
             const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
             const tw = 0.55 + 0.45 * Math.sin(renderTimeSec * 54 + px);   // fast twinkle
-            ctx.fillStyle = `rgba(255,${(220 + a * 35) | 0},${(140 * a) | 0},${(a * tw).toFixed(3)})`;
+            ctx.fillStyle = rgbQ(255, (220 + a * 35) | 0, (140 * a) | 0);
+            ctx.globalAlpha = a * tw;
             ctx.beginPath();
             ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
@@ -3298,19 +3357,22 @@ function render() {
             const a = Math.min(1, p.life);
             const tw = 0.7 + 0.3 * Math.sin((p.phase || 0) + renderTimeSec * 10.8); // soft pulse
             // soft glow halo
-            ctx.fillStyle = `rgba(255,${(130 + a * 70) | 0},${(40 * a) | 0},${(a * 0.16 * tw).toFixed(3)})`;
+            ctx.fillStyle = rgbQ(255, (130 + a * 70) | 0, (40 * a) | 0);
+            ctx.globalAlpha = a * 0.16 * tw;
             ctx.beginPath();
             ctx.arc(px, py, p.size * 3.4, 0, Math.PI * 2);
             ctx.fill();
             // comet trail
             ctx.lineWidth = p.size * 0.9;
-            ctx.strokeStyle = `rgba(255,${(120 + a * 100) | 0},${(20 * a) | 0},${(a * 0.45).toFixed(3)})`;
+            ctx.strokeStyle = rgbQ(255, (120 + a * 100) | 0, (20 * a) | 0);
+            ctx.globalAlpha = a * 0.45;
             ctx.beginPath();
             ctx.moveTo(px - p.vx * 2.4, py - p.vy * 2.4);
             ctx.lineTo(px, py);
             ctx.stroke();
             // bright core
-            ctx.fillStyle = `rgba(255,${(225 + a * 30) | 0},${(160 * a) | 0},${(a * tw).toFixed(3)})`;
+            ctx.fillStyle = rgbQ(255, (225 + a * 30) | 0, (160 * a) | 0);
+            ctx.globalAlpha = a * tw > 1 ? 1 : a * tw;
             ctx.beginPath();
             ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
@@ -3359,15 +3421,17 @@ function render() {
 
     // Smoke (above fire, below leaves) — per-particle shade for variety
     if (props.showSmoke && smokeParticles.length) {
+        ctx.save();
         for (const p of smokeParticles) {
             const px = drawX(p), py = drawY(p);
-            const a = (p.life * 0.14).toFixed(3);
             const s = p.shade | 0;
-            ctx.fillStyle = `rgba(${s},${(s * 0.95) | 0},${(s * 0.88) | 0},${a})`;
+            ctx.fillStyle = rgbQ(s, (s * 0.95) | 0, (s * 0.88) | 0);
+            ctx.globalAlpha = p.life * 0.14;
             ctx.beginPath();
             ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
         }
+        ctx.restore();
     }
 
     // Fireflies (between embers/smoke and birds — drift glow)
