@@ -78,7 +78,7 @@ const props = {
     showLeaves:        true,
     screenEffects:     true,   // full-screen weather tint + RGB vignette (off = calmer background)
     showRivers:        true,
-    showLilyPads:      true,
+    showLilyPads:      false,  // floating green pads on ponds (off by default — kept as a toggle)
     showPaths:         true,
     showRocks:         true,
     showElevation:     true,
@@ -3031,6 +3031,35 @@ function hash01(seed, n) {
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
+// Build a clip path for a burn-scar cell that BORDERS WATER: the water-facing
+// edges are pulled in and rounded so the opaque scar recedes organically from
+// the shoreline (revealing the soft bank beneath) instead of cutting a hard
+// square into the river. Land-facing edges stay at full extent (square corners)
+// so adjacent scar cells still tile seamlessly with no gaps.
+function scarLandPath(c, px, py, cell, wN, wE, wS, wW) {
+    const inset = cell * 0.34;
+    const rad = cell * 0.30;
+    const xL = px + (wW ? inset : 0);
+    const xR = px + cell - (wE ? inset : 0);
+    const yT = py + (wN ? inset : 0);
+    const yB = py + cell - (wS ? inset : 0);
+    const rTL = (wN || wW) ? rad : 0;
+    const rTR = (wN || wE) ? rad : 0;
+    const rBR = (wS || wE) ? rad : 0;
+    const rBL = (wS || wW) ? rad : 0;
+    c.beginPath();
+    c.moveTo(xL + rTL, yT);
+    c.lineTo(xR - rTR, yT);
+    if (rTR) c.arcTo(xR, yT, xR, yT + rTR, rTR); else c.lineTo(xR, yT);
+    c.lineTo(xR, yB - rBR);
+    if (rBR) c.arcTo(xR, yB, xR - rBR, yB, rBR); else c.lineTo(xR, yB);
+    c.lineTo(xL + rBL, yB);
+    if (rBL) c.arcTo(xL, yB, xL, yB - rBL, rBL); else c.lineTo(xL, yB);
+    c.lineTo(xL, yT + rTL);
+    if (rTL) c.arcTo(xL, yT, xL + rTL, yT, rTL); else c.lineTo(xL, yT);
+    c.closePath();
+}
+
 function renderStaticLayer() {
     if (!staticCanvas) {
         staticCanvas = document.createElement("canvas");
@@ -3058,6 +3087,23 @@ function renderStaticLayer() {
             const s = grid[i];
             const px = x * cell;
             const py = y * cell;
+            // Burn-scar cells that touch water get an organic, receded edge so the
+            // opaque scar melts into the river bank instead of cutting a hard
+            // square. Only the few shoreline scar cells pay the clip cost.
+            let clipped = false;
+            if (s === ASH_GRASS || s === ASH_TREE || s === CHARRED ||
+                s === CHAR_COOL || s === SCORCH || s === SPROUT) {
+                const wN = y > 0        && grid[i - cols] === WATER;
+                const wS = y < rows - 1 && grid[i + cols] === WATER;
+                const wW = x > 0        && grid[i - 1]    === WATER;
+                const wE = x < cols - 1 && grid[i + 1]    === WATER;
+                if (wN || wS || wW || wE) {
+                    sc.save();
+                    scarLandPath(sc, px, py, cell, wN, wE, wS, wW);
+                    sc.clip();
+                    clipped = true;
+                }
+            }
             if (s === ASH_GRASS) {
                 sc.fillStyle = "rgba(26,15,9,0.78)";       // warm-black smouldering ash
                 sc.fillRect(px, py, cell, cell);
@@ -3153,6 +3199,7 @@ function renderStaticLayer() {
                     sc.fillRect((px + hash01(seed, 60) * cell) | 0, (py + hash01(seed, 61) * cell * 0.6) | 0, 1, 1);
                 }
             }
+            if (clipped) sc.restore();
         }
     }
 

@@ -6,8 +6,12 @@ strikes during storms, rain extinguishes flames, and the forest slowly regrows.
 
 Features:
 - Procedural noise terrain (biomes, clearings, dense pockets)
-- Rivers, ponds, lily pads with flowers, shoreline tree reflections —
-  smooth blurred-mask shorelines (deep water → shallow rim, no blocky/circle edges)
+- Rivers, ponds, shoreline tree reflections — smooth blurred-mask shorelines
+  (deep water → shallow rim, no blocky/circle edges). Optional lily pads with
+  flowers (off by default — toggle in properties).
+- **Burn scars blend into the shoreline** — a burnt cell that borders water draws
+  with an organic, receded edge so the scar melts into the river bank instead of
+  cutting a hard square into the smooth water
 - Dirt paths winding through forest, scattered rocks, elevation shading
 - **Detailed side-view trees** (RimWorld-style) that stand up from the ground with
   visible trunks and dappled, textured canopies — 5 species: layered conifers,
