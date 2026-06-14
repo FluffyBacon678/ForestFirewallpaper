@@ -233,6 +233,43 @@
                 "value":  true
             },
 
+            "hdrSeason": {
+                "order": 35,
+                "text":   "──────── Seasons ────────",
+                "type":   "text"
+            },
+            "season": {
+                "order": 36,
+                "text":   "Season",
+                "type":   "combo",
+                "value":  "auto",
+                "options": [
+                    { "label": "Auto-cycle (slow year)", "value": "auto"   },
+                    { "label": "Spring (fresh green + blossom)", "value": "spring" },
+                    { "label": "Summer (peak lush)",     "value": "summer" },
+                    { "label": "Autumn (gold / leaf-fall)", "value": "autumn" },
+                    { "label": "Winter (snow + ice)",    "value": "winter" }
+                ]
+            },
+            "seasonLength": {
+                "order": 37,
+                "text":   "Season length (seconds each, auto-cycle)",
+                "type":   "slider",
+                "value":  120,
+                "min":    20,
+                "max":    600,
+                "step":   5
+            },
+            "snowAmount": {
+                "order": 38,
+                "text":   "Winter snow intensity",
+                "type":   "slider",
+                "value":  0.9,
+                "min":    0.0,
+                "max":    1.5,
+                "step":   0.05
+            },
+
             "hdrWeather": {
                 "order": 40,
                 "text":   "──────── Weather ────────",

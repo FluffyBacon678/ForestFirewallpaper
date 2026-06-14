@@ -63,6 +63,10 @@ const props = {
     mouseInteraction:  true,
     igniteRadius:      2,
     debugOverlay:      false,
+    // Seasons — a slow year cycle that re-colours the whole forest
+    season:            "auto",  // auto / spring / summer / autumn / winter
+    seasonLength:      120,     // seconds spent in each season (full year = 4×)
+    snowAmount:        0.9,     // winter snow intensity (cover + falling flakes)
     // Weather
     weatherMode:       "auto", // auto / clear / cloudy / rain / storm
     weatherDirection:  "leftToRight", // leftToRight / rightToLeft / topToBottom / bottomToTop / static
@@ -151,7 +155,7 @@ const UPDATE_EVERY      = 2;
 const MAX_SMOKE         = 1500;
 const MAX_EMBERS        = 700;
 const MAX_WIND_PARTS    = 90;
-const MAX_LEAVES        = 140;
+const MAX_LEAVES        = 240;  // higher cap so autumn leaf-fall / spring blossom read as dense
 const MAX_LIGHTNING     = 4;
 const MAX_PLUMES        = 700;
 const MAX_SPARKS        = 400;
@@ -382,6 +386,28 @@ let qMul = 1.0;
 // Audio reactivity — set by Wallpaper Engine's audio listener (0..1 average)
 let audioLevel = 0;
 let audioBass  = 0;
+
+// ---- Seasons ----------------------------------------------------------------
+// seasonPos is a continuous position on the year wheel: 0=spring, 1=summer,
+// 2=autumn, 3=winter, wrapping at 4. Visuals are interpolated between the two
+// bracketing seasons so transitions are smooth. Start in summer (peak lush).
+let seasonPos   = 1.0;
+let seasonParam = null;       // current interpolated look (object, reused each frame)
+let snowFlakes  = [];         // screen-space falling snow (winter)
+let snowPattern = null;       // cached speckle texture for the ground snow blanket
+const MAX_SNOW  = 900;
+const SEASON_IDX = { spring: 0, summer: 1, autumn: 2, winter: 3 };
+// Per-season keyframes (spring, summer, autumn, winter). ta = tint alpha,
+// desat = greyscale pull, snow/ice 0..1, leaf = ambient-leaf spawn factor,
+// leafTint = override colour for drifting leaves (blossom/leaf-fall), bright =
+// screen-white lift. Summer is deliberately neutral (the most "untouched" look).
+const SEASON_KF = [
+    { tr: 150, tg: 240, tb: 150, ta: 0.18, mode: "soft-light", desat: 0.00, snow: 0.0,  ice: 0.0,  leaf: 0.85, leafTint: [244, 156, 196], bright: 0.09 }, // spring — fresh green + pink blossom
+    { tr: 255, tg: 244, tb: 205, ta: 0.00, mode: "soft-light", desat: 0.00, snow: 0.0,  ice: 0.0,  leaf: 0.12, leafTint: null,            bright: 0.00 }, // summer — neutral / peak lush
+    { tr: 240, tg: 142, tb: 50,  ta: 0.32, mode: "soft-light", desat: 0.06, snow: 0.0,  ice: 0.0,  leaf: 1.00, leafTint: [180, 88, 28],   bright: 0.00 }, // autumn — gold/red + leaf-fall
+    { tr: 158, tg: 188, tb: 228, ta: 0.22, mode: "soft-light", desat: 0.55, snow: 1.0,  ice: 0.85, leaf: 0.00, leafTint: null,            bright: 0.06 }, // winter — snow + frost
+];
+function lerpN(a, b, t) { return a + (b - a) * t; }
 
 // Wind gust state — temporary burst above base windStrength
 let gustStrength = 0;       // 0..1.5 boost added to windStrength
@@ -1904,6 +1930,96 @@ function targetWeatherFromMode() {
     }
 }
 
+// Advance the year wheel. Auto mode drifts continuously; a forced season eases
+// toward its slot along the shortest path so manual changes still transition.
+function updateSeason(dt) {
+    if (props.season === "auto") {
+        const yearSec = Math.max(32, props.seasonLength * 4);
+        seasonPos += (4 / (yearSec * SIM_BASE_HZ)) * dt;
+        if (seasonPos >= 4) seasonPos -= 4;
+    } else {
+        const target = (SEASON_IDX[props.season] != null) ? SEASON_IDX[props.season] : 1;
+        let d = target - seasonPos;
+        if (d > 2) d -= 4; else if (d < -2) d += 4;           // shortest wrapped path
+        const step = (0.5 / SIM_BASE_HZ) * dt;                // ~0.5 season-units / sec
+        if (Math.abs(d) <= step) seasonPos = target;
+        else seasonPos += Math.sign(d) * step;
+        if (seasonPos >= 4) seasonPos -= 4; else if (seasonPos < 0) seasonPos += 4;
+    }
+    computeSeasonParams();
+}
+
+// Interpolate the look of the current moment between its two bracketing seasons.
+function computeSeasonParams() {
+    const p0 = Math.floor(seasonPos) % 4;
+    const p1 = (p0 + 1) % 4;
+    const f  = seasonPos - Math.floor(seasonPos);
+    const A = SEASON_KF[p0], B = SEASON_KF[p1];
+    const s = seasonParam || (seasonParam = {});
+    s.tr = lerpN(A.tr, B.tr, f); s.tg = lerpN(A.tg, B.tg, f); s.tb = lerpN(A.tb, B.tb, f);
+    s.ta = lerpN(A.ta, B.ta, f);
+    s.desat  = lerpN(A.desat, B.desat, f);
+    s.snow   = lerpN(A.snow, B.snow, f) * Math.max(0, Math.min(1.5, props.snowAmount));
+    s.ice    = lerpN(A.ice, B.ice, f);
+    s.leaf   = lerpN(A.leaf, B.leaf, f);
+    s.bright = lerpN(A.bright, B.bright, f);
+    s.mode   = (A.ta >= B.ta) ? A.mode : B.mode;
+    const l0 = A.leafTint, l1 = B.leafTint;
+    if (l0 && l1)      s.leafTint = [lerpN(l0[0], l1[0], f), lerpN(l0[1], l1[1], f), lerpN(l0[2], l1[2], f)];
+    else if (l0 && f < 0.5) s.leafTint = l0;
+    else if (l1 && f >= 0.5) s.leafTint = l1;
+    else s.leafTint = null;
+    return s;
+}
+
+// Falling snow — screen-space drifting flakes (decoupled from the camera, like an
+// atmospheric overlay). Count scales with the current snow intensity.
+function updateSnow(dt) {
+    const sp = seasonParam ? seasonParam.snow : 0;
+    if (sp <= 0.03) { if (snowFlakes.length) snowFlakes.length = 0; return; }
+    const cap = (MAX_SNOW * qMul) | 0;
+    const target = (cap * Math.min(1, sp)) | 0;
+    let toSpawn = Math.min(7, target - snowFlakes.length);
+    while (toSpawn-- > 0 && snowFlakes.length < cap) {
+        snowFlakes.push({
+            x: Math.random() * canvas.width,
+            y: -5 - Math.random() * 30,
+            vx: (Math.random() - 0.5) * 0.3,
+            vy: 0.6 + Math.random() * 0.9,
+            size: 0.8 + Math.random() * 1.7,
+            sway: Math.random() * 6.28,
+            swaySpd: 0.02 + Math.random() * 0.05,
+            depth: 0.5 + Math.random() * 0.5,
+        });
+    }
+    const wxF = Math.cos(windAngle) * props.windStrength;
+    const W = canvas.width, H = canvas.height;
+    let wI = 0;
+    for (let i = 0; i < snowFlakes.length; i++) {
+        const p = snowFlakes[i];
+        p.sway += p.swaySpd * dt;
+        p.x += (p.vx + wxF * 0.5 + Math.sin(p.sway) * 0.5) * dt;
+        p.y += (p.vy * (0.7 + p.depth)) * dt;
+        if (p.x < -10) p.x += W + 20; else if (p.x > W + 10) p.x -= W + 20;
+        if (p.y < H + 12) snowFlakes[wI++] = p;
+    }
+    snowFlakes.length = wI;
+}
+
+// Cached speckle texture that adds subtle sparkle/texture to the snow blanket.
+function buildSnowPattern() {
+    const t = document.createElement("canvas");
+    t.width = 96; t.height = 96;
+    const c = t.getContext("2d");
+    for (let k = 0; k < 220; k++) {
+        const a = Math.random();
+        c.fillStyle = a < 0.5 ? `rgba(255,255,255,${(0.15 + Math.random() * 0.3).toFixed(2)})`
+                              : `rgba(196,210,232,${(0.10 + Math.random() * 0.2).toFixed(2)})`;
+        c.fillRect((Math.random() * 96) | 0, (Math.random() * 96) | 0, 1, 1);
+    }
+    snowPattern = ctx.createPattern(t, "repeat");
+}
+
 function updateWeather(dt) {
     const forced = targetWeatherFromMode();
     if (forced !== null) {
@@ -2233,7 +2349,15 @@ function spawnLeaf() {
         y = wyF > 0 ? -10 : h + 10;
         x = Math.random() * w;
     }
-    const color = LEAF_COLORS[(Math.random() * LEAF_COLORS.length) | 0];
+    // Seasonal tint overrides the default palette (gold/red in autumn, soft pink
+    // blossom in spring); summer keeps the natural mixed-green palette.
+    let color;
+    if (seasonParam && seasonParam.leafTint) {
+        const t = seasonParam.leafTint, j = 0.85 + Math.random() * 0.3;
+        color = [Math.min(255, t[0] * j) | 0, Math.min(255, t[1] * j) | 0, Math.min(255, t[2] * j) | 0];
+    } else {
+        color = LEAF_COLORS[(Math.random() * LEAF_COLORS.length) | 0];
+    }
     leaves.push({
         x, y,
         vx: wxF * (0.7 + Math.random() * 1.0),
@@ -2567,6 +2691,10 @@ function update(dt = SIM_DT) {
     // Fish glide in the water
     updateFish(dt);
 
+    // Seasons — slow year cycle that re-colours everything + drives snow/leaves
+    updateSeason(dt);
+    updateSnow(dt);
+
     // Weather + lightning bolts (+ persistent strike afterglow)
     updateWeather(dt);
     updateClouds(dt);
@@ -2656,9 +2784,13 @@ function update(dt = SIM_DT) {
         }
     }
 
-    // Ambient leaves drifting in wind (independent of fire)
-    if (props.showLeaves && props.showWindParticles && props.windStrength > 0.05) {
-        const spawnRate = 0.25 * Math.min(1, props.windStrength);
+    // Ambient leaves drifting in wind (independent of fire). Season drives the
+    // volume: a blizzard of leaf-fall in autumn, a few blossom petals in spring,
+    // suppressed under deep-winter snow.
+    const seasonLeaf = seasonParam ? seasonParam.leaf : 1;
+    const leafActive = (seasonParam ? seasonParam.snow : 0) < 0.5;
+    if (props.showLeaves && leafActive && props.showWindParticles && props.windStrength > 0.05) {
+        const spawnRate = 0.25 * Math.min(1, props.windStrength) * (0.2 + seasonLeaf * 2.6);
         if (leaves.length < (MAX_LEAVES * qMul) | 0 && Math.random() < spawnRate * dt) spawnLeaf();
         const wxL = wxF * 0.05 * props.windStrength;
         const wyL = wyF * 0.05 * props.windStrength;
@@ -3393,6 +3525,39 @@ function render() {
         ctx.restore();
     }
 
+    // --- Winter ground: snow blanket over the land + pale ice on the water ---
+    // Drawn UNDER the trees so trunks/canopy stand above the snow. World-space.
+    if (seasonParam && (seasonParam.snow > 0.03 || seasonParam.ice > 0.03)) {
+        const sp = seasonParam.snow, ip = seasonParam.ice;
+        if (ip > 0.03) {
+            // Frozen water — pale icy sheen on the visible water cells
+            const ix0 = Math.max(0, (camX / cell) | 0);
+            const ix1 = Math.min(cols - 1, Math.ceil((camX + w) / cell));
+            const iy0 = Math.max(0, (camY / cell) | 0);
+            const iy1 = Math.min(rows - 1, Math.ceil((camY + h) / cell));
+            ctx.fillStyle = `rgba(206,228,242,${(ip * 0.55).toFixed(3)})`;
+            for (let y = iy0; y <= iy1; y++) {
+                const rb = y * cols;
+                for (let x = ix0; x <= ix1; x++) {
+                    if (grid[rb + x] === WATER) ctx.fillRect(x * cell, y * cell, cell, cell);
+                }
+            }
+        }
+        if (sp > 0.03) {
+            // Snow blanket — bluish white over the whole visible world + speckle
+            if (!snowPattern) buildSnowPattern();
+            ctx.fillStyle = `rgba(238,244,255,${(sp * 0.72).toFixed(3)})`;
+            ctx.fillRect(camX, camY, w, h);
+            if (snowPattern) {
+                ctx.save();
+                ctx.globalAlpha = sp * 0.5;
+                ctx.fillStyle = snowPattern;
+                ctx.fillRect(camX, camY, w, h);
+                ctx.restore();
+            }
+        }
+    }
+
     // PASS 3 — side-view trees, drawn into a cached layer (rebuilt every few
     // frames) then blitted. Rows go top→bottom so nearer trees overlap the ones
     // behind (depth); each sprite's BASE anchors near the cell's lower-centre and
@@ -3843,6 +4008,51 @@ function render() {
     // Back to screen space for the full-screen overlays + cursor UI.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
 
+    // --- Seasonal colour grade over the whole scene ---
+    // Winter desaturates + cools, autumn warms to gold, spring freshens, summer
+    // is neutral. Always on (it IS the seasonal look), kept tasteful.
+    if (seasonParam) {
+        const s = seasonParam;
+        if (s.desat > 0.01) {
+            ctx.save();
+            ctx.globalCompositeOperation = "saturation";
+            ctx.fillStyle = "hsl(0,0%,50%)";
+            ctx.globalAlpha = s.desat;
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+        }
+        if (s.ta > 0.005) {
+            ctx.save();
+            ctx.globalCompositeOperation = s.mode;
+            ctx.fillStyle = `rgba(${s.tr | 0},${s.tg | 0},${s.tb | 0},${s.ta.toFixed(3)})`;
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+        }
+        if (s.bright > 0.005) {
+            ctx.save();
+            ctx.globalCompositeOperation = "screen";
+            ctx.fillStyle = `rgba(255,255,255,${s.bright.toFixed(3)})`;
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+        }
+        if (s.snow > 0.03) {                 // gentle frost wash over the canopy
+            ctx.fillStyle = `rgba(244,248,255,${(s.snow * 0.12).toFixed(3)})`;
+            ctx.fillRect(0, 0, w, h);
+        }
+    }
+
+    // Falling snow — screen-space flakes in front of the scene
+    if (snowFlakes.length) {
+        ctx.fillStyle = "#ffffff";
+        for (const p of snowFlakes) {
+            ctx.globalAlpha = 0.45 + p.depth * 0.5;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * (0.5 + p.depth * 0.6), 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
+
     // Mouse hover indicator — small ignition-radius preview
     if (props.showMouseHint && props.mouseInteraction && mouseInside) {
         const r = Math.max(1, props.igniteRadius) * cell;
@@ -4121,6 +4331,13 @@ function applyProperty(key, raw) {
             props[key] = !!v;
             needRebuild = true;
             needBg = true;
+            break;
+        case "season":
+            props.season = String(v);
+            break;
+        case "seasonLength":
+        case "snowAmount":
+            props[key] = Number(v);
             break;
         case "weatherMode":
             props.weatherMode = String(v);

@@ -5,6 +5,13 @@ spread through grass and trees with the wind, embers fly, smoke billows, lightni
 strikes during storms, rain extinguishes flames, and the forest slowly regrows.
 
 Features:
+- **Four-season year cycle** — the whole forest slowly drifts through **spring**
+  (fresh bright green + drifting pink blossom), **summer** (peak lush, the most
+  detailed/neutral look), **autumn** (warm gold/red colour grade + heavy leaf-fall)
+  and **winter** (a snow blanket over the ground, frosted desaturated canopy,
+  pale frozen ponds and rivers, and falling snow). Seasons blend smoothly between
+  stages; leave it on **Auto-cycle** (set the length of each season) or pin a
+  single season from the Wallpaper Engine panel. Snow intensity is adjustable.
 - Procedural noise terrain (biomes, clearings, dense pockets)
 - Rivers, ponds, shoreline tree reflections — smooth blurred-mask shorelines
   (deep water → shallow rim, no blocky/circle edges). Optional lily pads with
@@ -225,6 +232,7 @@ Organized into sections in the Wallpaper Engine picker:
 | Terrain | Tree density (lushness), Tree size, Grass density, Rock density, Zoom (smaller = more zoomed out / lusher), Rivers, Lily pads, Paths, Rocks, Elevation shading |
 | Fire | Spread rate, Tree burn duration, Grass burn duration, Fire glow, Flame plumes, Embers, Smoke |
 | Wind | Wind strength, Wind rotation speed, Wind streaks, Drifting leaves |
+| Seasons | Season (auto/spring/summer/autumn/winter), Season length (auto-cycle), Winter snow intensity |
 | Weather | Mode (auto/drought/clear/cloudy/rain/monsoon/storm), Front direction (LTR/RTL/TTB/BTT/static), Transition speed, Cloud shadows, Rain intensity, Rain scatter, Rain extinguishes |
 | Auto-ignition & regrowth | Auto-ignite, Auto-ignite rate, Regrowth, Regrowth rate |
 | Atmosphere | Birds, Fireflies, Fish shadows, Screen effects toggle, Wind gusts, Starter fire on load |
