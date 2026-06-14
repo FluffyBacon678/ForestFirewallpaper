@@ -9,9 +9,11 @@ Features:
   (fresh bright green + drifting pink blossom), **summer** (peak lush, the most
   detailed/neutral look), **autumn** (warm gold/red colour grade + heavy leaf-fall)
   and **winter** (a snow blanket over the ground, frosted desaturated canopy,
-  pale frozen ponds and rivers, and falling snow). Seasons blend smoothly between
-  stages; leave it on **Auto-cycle** (set the length of each season) or pin a
-  single season from the Wallpaper Engine panel. Snow intensity is adjustable.
+  pale frozen ponds and rivers, and falling snow). On Auto-cycle each season
+  **dwells at its full look** for most of its slot then blends over the tail, so
+  the year actually *shows* spring/summer/autumn/winter instead of sitting in a
+  permanent half-blend. Leave it on **Auto-cycle** (set the length of each season)
+  or pin a single season from the Wallpaper Engine panel; snow intensity is adjustable.
 - Procedural noise terrain (biomes, clearings, dense pockets)
 - Rivers, ponds, shoreline tree reflections — smooth blurred-mask shorelines
   (deep water → shallow rim, no blocky/circle edges). Optional lily pads with
@@ -62,6 +64,10 @@ Features:
   out, adding the snap and life of a real fire
 - **Glowing ember motes** — drifting embers carry a soft warm halo and a gentle pulse,
   floating like living sparks of light
+- **Living low/dying fire** — smoldering and burnt-out cells aren't uniform red dots:
+  each gets a warm-hue spread (ember-red → orange → amber), a wide soft underglow so
+  neighbours fuse into one continuous creeping ember bed, and the odd small flame lick,
+  so a low or dying burn reads as glowing coals rather than polka-dots
 - **Heat-shimmer distortion** — a subtle ripple above a blaze (off by default; it's
   a big effect, so it stays out of the way unless you turn it on)
 - **Magic fire** (optional slider) — turn it up for coherent patches of cyan, green,
@@ -129,6 +135,17 @@ Measured frame times (1.5× world, ~1080p): **idle forest ~3.3 ms**, an active
 wildfire ~4.7 ms, a calm forest with no wind ~1.6 ms, and a worst-case 700+ cell
 inferno ~9 ms — all inside the 120 fps budget, with most of the day spent far
 under it. Sim ticks run in well under 0.2 ms.
+
+### 4K / high-DPI
+
+The biggest cost is redrawing the swaying tree canopy, which scales with the
+number of on-screen trees. At native 4K a 10 px cell would pack **4× the trees**
+of 1080p (and render them microscopically), so **"Scale detail with resolution"**
+(on by default) grows the internal cell size with the display — a 4K screen
+renders the same physical tree size and density as 1080p (≈¼ the trees), keeping
+the tree-layer cost flat across resolutions. If you *want* true-pixel density at
+4K, turn it off (and expect a much heavier load). Other 4K levers: raise **Zoom**,
+drop **Quality preset** to Medium/Low, or lower **Tree density** / **Map size**.
 
 Key optimizations:
 - **Two-tier baked layers**: the worldgen-static terrain (dirt, smooth water,
@@ -228,7 +245,7 @@ Organized into sections in the Wallpaper Engine picker:
 
 | Section | Properties |
 |---|---|
-| Performance | Quality preset (Low/Medium/High/Ultra), Max FPS |
+| Performance | Quality preset (Low/Medium/High/Ultra), Max FPS, Scale detail with resolution (4K) |
 | Terrain | Tree density (lushness), Tree size, Grass density, Rock density, Zoom (smaller = more zoomed out / lusher), Rivers, Lily pads, Paths, Rocks, Elevation shading |
 | Fire | Spread rate, Tree burn duration, Grass burn duration, Fire glow, Flame plumes, Embers, Smoke |
 | Wind | Wind strength, Wind rotation speed, Wind streaks, Drifting leaves |

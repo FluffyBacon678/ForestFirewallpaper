@@ -40,6 +40,12 @@
                     { "label": "Unlimited (match monitor)", "value": "unlimited" }
                 ]
             },
+            "hiDpiScale": {
+                "order":  3,
+                "text":   "Scale detail with resolution (recommended for 4K)",
+                "type":   "bool",
+                "value":  true
+            },
 
             "hdrTerrain": {
                 "order": 10,

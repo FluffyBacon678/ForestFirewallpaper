@@ -37,6 +37,8 @@ const props = {
     grassDensity:      1.00,   // ground heavily covered in green growth
     rockDensity:       0.04,
     cellSize:          10,     // zoom: smaller = more zoomed out / lusher
+    hiDpiScale:        true,    // scale the cell with resolution so 4K keeps 1080p
+                               // density (else 4K = 4× the trees/cells → slow + tiny)
     treeScale:         0.80,   // tree size (smaller = plantier)
     // Camera / map panning (world is generated larger than the screen)
     worldSize:         1.5,    // world dimensions vs screen (1 = no pan room)
@@ -376,6 +378,15 @@ const SIM_DT      = SIM_BASE_HZ / SIM_HZ;
 const MAX_SIM_PER_FRAME = 8;     // cap catch-up loops to avoid death spiral
 let renderTimeSec = 0;
 
+// Resolution / DPI scaling — multiplies the effective cell size so a 4K display
+// renders the same physical tree size and density as 1080p (instead of 4× the
+// cells = 4× the trees = a CPU-bound tree-layer rebuild). Read everywhere the
+// cell size is derived; updated whenever the grid is (re)built.
+let dpiScale = 1;
+function refreshDpiScale() {
+    dpiScale = props.hiDpiScale ? Math.max(1, Math.min(3, canvas.height / 1080)) : 1;
+}
+
 // FPS cap — 0 = unlimited, otherwise minimum ms between rendered frames
 let minFrameMs    = 0;
 let lastRenderMs  = 0;
@@ -541,7 +552,8 @@ function drawDirtBackground() {
 // Sprite atlases — trees (top-down round canopies) + grass tufts
 // ============================================================
 function buildSpriteAtlases() {
-    const cell = Math.max(4, props.cellSize | 0);
+    refreshDpiScale();
+    const cell = Math.max(4, (props.cellSize * dpiScale) | 0);
     // Detailed SIDE-VIEW trees that stand up from their cell. Kept fairly compact
     // and "planty" so a dense forest reads as a lush canopy rather than giant
     // towers; the treeScale property fine-tunes their size. Anchored at the base.
@@ -775,7 +787,7 @@ function drawDeadSide(c, cx, baseY, w, h, sizeIdx) {
 // Rock sprites — small gray pebble/boulder shapes
 // ============================================================
 function buildRockSprites() {
-    const cell = Math.max(4, props.cellSize | 0);
+    const cell = Math.max(4, (props.cellSize * dpiScale) | 0);
     rockSpW = cell;
     rockSpH = cell;
     if (!rockSprites) rockSprites = document.createElement("canvas");
@@ -1461,7 +1473,7 @@ function pickRegrowthVariant() {
 
 // Rescan the grid for glowing-mushroom cells (cheap; runs on worldgen + ~1×/sec).
 function refreshGlowSpots() {
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const spots = [];
     for (let i = 0; i < grid.length; i++) {
         if (grid[i] === GRASS && grassVar[i] === GRASS_GLOWMUSH) {
@@ -1482,7 +1494,7 @@ function refreshGlowSpots() {
 // Fish — dark shadows gliding under the water surface
 // ============================================================
 function isWaterAt(px, py) {
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const cx = (px / cell) | 0, cy = (py / cell) | 0;
     if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) return false;
     return grid[idx(cx, cy)] === WATER;
@@ -1490,7 +1502,7 @@ function isWaterAt(px, py) {
 function spawnFish() {
     fishList = [];
     if (!props.showFish) return;
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const water = [];
     for (let i = 0; i < grid.length; i++) if (grid[i] === WATER) water.push(i);
     if (!water.length) return;
@@ -1525,7 +1537,8 @@ function updateFish(dt) {
 // Init / resize
 // ============================================================
 function rebuildGrid() {
-    const cell = Math.max(2, props.cellSize | 0);
+    refreshDpiScale();
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     // World is "worldSize" times the viewport in each dimension, so there's room
     // for the camera to pan around. worldSize 1 = world == screen (no pan).
     const ws = Math.max(1, props.worldSize || 1);
@@ -1721,7 +1734,7 @@ function igniteCell(i) {
 }
 
 function igniteAt(px, py, radius) {
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const cx = (px / cell) | 0;
     const cy = (py / cell) | 0;
     const r  = Math.max(1, radius | 0);
@@ -2241,7 +2254,7 @@ function updateRain(dt) {
         // Occasionally extinguish a burning cell
         if (props.rainExtinguishes && burningCount > 0) {
             const tries = Math.ceil(intensity * 3);
-            const cell = Math.max(2, props.cellSize | 0);
+            const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
             for (let t = 0; t < tries; t++) {
                 if (Math.random() < intensity * 0.6 * dt) {
                     // Find a random burning cell and extinguish it
@@ -2413,7 +2426,7 @@ function update(dt = SIM_DT) {
         if (s === BURN_GRASS || s === BURN_TREE) burningList.push(i);
     }
 
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
     for (let k = 0; k < burningList.length; k++) {
         const i = burningList[k];
@@ -2962,7 +2975,7 @@ function markTerrainDirty() { terrainDirty = true; staticDirty = true; }
 // Used by regrowth so the forest can recover without per-event rebake hitches.
 function terrainDrawGrass(i) {
     if (!terrainCanvas) { markTerrainDirty(); return; }
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const y = (i / cols) | 0, x = i - y * cols;
     terrainCtx.drawImage(grassSprites, grassVar[i] * grassSpW, 0, grassSpW, grassSpH,
                          x * cell, y * cell, grassSpW, grassSpH);
@@ -2970,7 +2983,7 @@ function terrainDrawGrass(i) {
 }
 function terrainRestoreDirt(i) {
     if (!terrainCanvas) { markTerrainDirty(); return; }
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const y = (i / cols) | 0, x = i - y * cols;
     // Repaint the bare dirt background for this one cell (clears baked grass)
     terrainCtx.drawImage(bgCanvas, x * cell, y * cell, cell, cell,
@@ -2993,7 +3006,7 @@ function bakeTerrain() {
     const sc = terrainCtx;
     const w = terrainCanvas.width;
     const h = terrainCanvas.height;
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
     sc.clearRect(0, 0, w, h);
     sc.drawImage(bgCanvas, 0, 0);
@@ -3217,7 +3230,7 @@ function renderStaticLayer() {
     const sc = staticCtx;
     const w = staticCanvas.width;
     const h = staticCanvas.height;
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
     sc.clearRect(0, 0, w, h);
     sc.drawImage(terrainCanvas, 0, 0);
@@ -3388,7 +3401,7 @@ function drawWorldLayer(src, cx, cy, vw, vh) {
 function render() {
     const w = canvas.width;
     const h = canvas.height;
-    const cell = Math.max(2, props.cellSize | 0);
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
     updateCamera();
 
@@ -3657,7 +3670,10 @@ function render() {
         // Calm wind = snapped sway is permanently 0, so the layer only changes
         // when trees change or the camera moves: drop to a slow fallback cadence
         // (tree changes below and the camera jump-guard force instant refreshes).
-        treeLayerCountdown = (swayScale < 0.5) ? 30 : TREE_LAYER_GAP;
+        // At high DPI each rebuild is pricier (more visible trees) so the swaying
+        // cadence eases off too — the 1px sway reads fine at a lower refresh.
+        const activeGap = Math.round(TREE_LAYER_GAP * dpiScale);
+        treeLayerCountdown = (swayScale < 0.5) ? 30 : activeGap;
     }
     treeLayerCountdown--;
     drawWorldLayer(treeLayerCanvas, camX, camY, w, h);
@@ -4307,6 +4323,11 @@ function applyProperty(key, raw) {
             break;
         case "cellSize":
             props.cellSize = Math.max(1, parseInt(v, 10) || props.cellSize);
+            needRebuild = true;
+            needBg = true;
+            break;
+        case "hiDpiScale":
+            props.hiDpiScale = !!v;
             needRebuild = true;
             needBg = true;
             break;
