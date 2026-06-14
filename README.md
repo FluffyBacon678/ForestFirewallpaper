@@ -25,12 +25,15 @@ Features:
   slider.
 - **Lush green jungle floor** — a mossy green ground (not bare brown dirt) carpeted
   in dense green growth, for a verdant, almost-jungle look
-- **37 ground-cover types** baked into the grass atlas: ten lush-grass variations,
+- **44 ground-cover types** baked into the grass atlas: ten lush-grass variations,
   tall grass, dry grass, six wildflower colours, clover, ferns, shrubs, dandelion
   puffs, spotted mushrooms, berry bushes, flower patches, lavender, tulips,
-  pampas-grass plumes, reeds/cattails, **glowing bioluminescent mushrooms**, and
-  **jungle plants** (broadleaf clumps, big jungle ferns, elephant-ear leaves).
-  Lush green growth dominates; the showy ones are accents.
+  pampas-grass plumes, reeds/cattails, **glowing bioluminescent mushrooms**,
+  **jungle plants** (broadleaf clumps, big jungle ferns, elephant-ear leaves), and
+  a richer flower/clutter band — **daisies, poppies, tall fireweed spikes,
+  buttercups, dense wildflower meadows**, plus non-plant ground litter (**scattered
+  pebbles, fallen leaves and twigs**). Lush green growth dominates; the showy ones
+  are accents.
 - Two flammable layers (grass + trees), separate burn rates
 - **Fire lifecycle** — every cell goes smolder → grow → blaze → die back to embers
   (cubic ease-in): a new flame starts as a tiny ~15%-size faint ember, stays small
@@ -55,10 +58,18 @@ Features:
 - Competing glows (fireflies, glowing mushrooms) are kept subtle so the fire is the star
 - Spread is tuned for the lush forest so fires **creep and stay contained** rather
   than engulfing the screen (slower base spread + rarer ember spot-fires)
-- **Burn-scar lifecycle** — after the flames pass, a cell goes through smouldering
-  ash → a lingering **charred-earth scar** (cold blackened ground) → bare dirt →
-  regrown grass → sapling → tree, so a fire leaves a visible black scar that slowly
-  heals back to green over minutes. Charred ground also acts as a natural firebreak.
+- **Multi-stage burn-scar lifecycle** — after the flames pass, the ground heals
+  through a visible weathering sequence rather than snapping back to green:
+  smouldering ash → **fresh black char** (charcoal chunks, ember still glowing in
+  the cracks) → **cooled grey ash bed** (warmth gone, pale ash dusting) → **bare
+  scorched earth** (burnt-umber cracked dirt) → **pioneer regrowth** (first moss
+  and tiny green sprouts breaking through) → grass → sapling → tree. A scar visibly
+  ages black → grey → brown → green over a couple of minutes, and the heal speed
+  follows the **Regrowth rate** slider (turn regrowth off and scars linger as a
+  barren scorched wasteland — also a natural firebreak).
+- **Wildflowers bloom after a fire** — burned ground regrows flower-rich, with
+  fireweed, poppies and dense meadows taking over the nutrient-rich ash before the
+  forest slowly reclaims it (just like a real post-fire bloom).
 - Wind drives fire spread direction, smoke drift, ember flight, leaf drift, tree sway
 - **Wind gusts** — occasional bursts that boost speed and shift direction (stronger in storms)
 - Lightning bolts with screen flash, **persistent afterglow column**, RGB edge pulse

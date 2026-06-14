@@ -109,7 +109,11 @@ const ASH_GRASS  = 5;
 const ASH_TREE   = 6;
 const WATER      = 7;  // non-burnable, blocks spread
 const ROCK       = 8;  // non-burnable, blocks spread (small gray sprite)
-const CHARRED    = 9;  // cold blackened scorched earth (a burn scar that lingers)
+const CHARRED    = 9;  // fresh blackened char, ember cracks still warm
+// Weathering scar stages — a burn slowly heals black → grey → bare earth → green
+const CHAR_COOL  = 10; // cooled grey charcoal + settled ash bed
+const SCORCH     = 11; // bare scorched earth (burnt-umber dirt, charcoal flecks)
+const SPROUT     = 12; // pioneer regrowth — first moss/weeds break through the ash
 
 // waterPhase bit layout (per cell):
 //   0x0F (bits 0-3): ripple phase (16 values)
@@ -234,8 +238,13 @@ const TREE_NUM_VARIANTS  = 10;  // 5 species × 2 sizes
 //   16-21 wildflowers (white, yellow, red, pink, purple, blue)
 //   22 clover  23 fern  24 shrub  25 dandelion  26 mushrooms  27 berry bush
 //   28 flower patch  29 lavender  30 tulips  31 pampas grass  32 reeds  33 glowing mushrooms
-const GRASS_NUM_VARIANTS = 37;   // + jungle broadleaf / fern / elephant-ear
+//   34-36 jungle broadleaf / fern / elephant-ear
+//   37 daisies  38 poppies  39 fireweed  40 buttercups  41 pebbles  42 leaf litter  43 wildflower meadow
+const GRASS_NUM_VARIANTS = 44;
 const GRASS_GLOWMUSH = 33;   // variant index whose cells emit a soft pulsing glow
+// Flower / clutter variants used to bias post-fire regrowth into a bloom meadow
+const GRASS_DAISY = 37, GRASS_POPPY = 38, GRASS_FIREWEED = 39,
+      GRASS_BUTTERCUP = 40, GRASS_PEBBLES = 41, GRASS_LITTER = 42, GRASS_MEADOW = 43;
 const TREE_TINTS = [
     { r: 32, g: 78,  b: 24 },  // darker green
     { r: 50, g: 105, b: 32 },  // brighter green
@@ -846,7 +855,14 @@ function renderGrassTopDown(c, ox, oy, w, h, variant) {
     else if (variant === 33) drawGlowMushrooms(c, ox, oy, w, h);
     else if (variant === 34) drawBroadleaf(c, ox, oy, w, h);
     else if (variant === 35) drawJungleFern(c, ox, oy, w, h);
-    else                     drawElephantEar(c, ox, oy, w, h);
+    else if (variant === 36) drawElephantEar(c, ox, oy, w, h);
+    else if (variant === 37) drawDaisies(c, ox, oy, w, h);
+    else if (variant === 38) drawPoppies(c, ox, oy, w, h);
+    else if (variant === 39) drawFireweed(c, ox, oy, w, h);
+    else if (variant === 40) drawButtercups(c, ox, oy, w, h);
+    else if (variant === 41) drawPebbles(c, ox, oy, w, h);
+    else if (variant === 42) drawLeafLitter(c, ox, oy, w, h);
+    else                     drawWildflowerMeadow(c, ox, oy, w, h);
 }
 
 // --- Lush grass (10 shade/density variations) — rich jungle greens ---
@@ -1234,26 +1250,187 @@ function drawElephantEar(c, ox, oy, w, h) {
     c.stroke();
 }
 
+// --- Daisies: white-petal rings with a yellow eye over lush grass ---
+function drawDaisies(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 0);
+    const n = 2 + (Math.random() * 2 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const cy = oy + 2 + Math.random() * (h - 4);
+        const pr = Math.max(1, w * 0.1);
+        c.fillStyle = "rgba(248,248,244,0.96)";
+        for (let p = 0; p < 6; p++) {
+            const a = (Math.PI * 2 / 6) * p;
+            c.beginPath();
+            c.arc(cx + Math.cos(a) * pr, cy + Math.sin(a) * pr, Math.max(0.8, pr * 0.6), 0, Math.PI * 2);
+            c.fill();
+        }
+        c.fillStyle = "rgba(250,206,72,1)";
+        c.beginPath(); c.arc(cx, cy, Math.max(1, pr * 0.55), 0, Math.PI * 2); c.fill();
+    }
+}
+
+// --- Poppies: red/orange cups on slender stems (classic fire-follower) ---
+function drawPoppies(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const n = 2 + (Math.random() * 2 | 0);
+    for (let i = 0; i < n; i++) {
+        const bx = ox + 2 + Math.random() * (w - 4);
+        const by = oy + h - 1;
+        const bh = h * (0.45 + Math.random() * 0.3);
+        const fx = bx + (Math.random() - 0.5) * 2, fy = by - bh;
+        c.strokeStyle = "rgba(60,120,46,0.85)";
+        c.lineWidth = 1;
+        c.beginPath(); c.moveTo(bx, by); c.lineTo(fx, fy); c.stroke();
+        const pr = Math.max(1.2, w * 0.13);
+        c.fillStyle = Math.random() < 0.5 ? "rgba(222,52,40,0.96)" : "rgba(238,108,32,0.96)";
+        c.beginPath(); c.arc(fx, fy, pr, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(40,18,16,0.9)";
+        c.fillRect((fx - 0.5) | 0, (fy - 0.5) | 0, 1, 1);
+    }
+}
+
+// --- Fireweed: tall magenta flower spike — the iconic plant that blooms after fire ---
+function drawFireweed(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 2);
+    const spikes = 1 + (Math.random() * 2 | 0);
+    for (let s = 0; s < spikes; s++) {
+        const bx = ox + 3 + Math.random() * (w - 6);
+        const by = oy + h - 1;
+        const sh = h * (0.7 + Math.random() * 0.28);
+        c.strokeStyle = "rgba(58,112,44,0.9)";
+        c.lineWidth = 1;
+        c.beginPath(); c.moveTo(bx, by); c.lineTo(bx, by - sh); c.stroke();
+        const blooms = Math.max(3, (sh / 2) | 0);
+        for (let b = 0; b < blooms; b++) {
+            const t = b / blooms;               // 0 bottom → 1 top
+            const yy = by - sh * t;
+            const open = 1 - t;                 // lower flowers open, top are buds
+            const rr = Math.max(0.8, w * 0.09 * (0.5 + open));
+            c.fillStyle = `rgba(${(214 - t * 30) | 0},${(50 + t * 40) | 0},${(130 + t * 30) | 0},0.88)`;
+            const off = (b & 1 ? 1 : -1) * w * 0.12;
+            c.beginPath(); c.arc(bx + off, yy, rr, 0, Math.PI * 2); c.fill();
+        }
+    }
+}
+
+// --- Buttercups: scattered bright-yellow dots ---
+function drawButtercups(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 0);
+    const n = 4 + (Math.random() * 4 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 1 + Math.random() * (w - 2);
+        const cy = oy + 1 + Math.random() * (h - 2);
+        const pr = Math.max(0.9, w * 0.07);
+        c.fillStyle = "rgba(252,214,40,0.95)";
+        c.beginPath(); c.arc(cx, cy, pr, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(255,248,180,0.9)";
+        c.fillRect((cx - 0.5) | 0, (cy - 0.5) | 0, 1, 1);
+    }
+}
+
+// --- Pebbles: small grey/tan stones (ground clutter, not a plant) ---
+function drawPebbles(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 3);
+    const n = 3 + (Math.random() * 3 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const cy = oy + 2 + Math.random() * (h - 4);
+        const r = Math.max(1, w * (0.08 + Math.random() * 0.08));
+        const g = 120 + (Math.random() * 50 | 0);
+        c.fillStyle = "rgba(0,0,0,0.2)";
+        c.beginPath(); c.ellipse(cx + 0.5, cy + 0.8, r, r * 0.7, 0, 0, Math.PI * 2); c.fill();
+        c.fillStyle = `rgb(${g},${g - 8},${g - 20})`;
+        c.beginPath(); c.ellipse(cx, cy, r, r * 0.75, 0, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(255,255,255,0.25)";
+        c.fillRect((cx - r * 0.3) | 0, (cy - r * 0.3) | 0, 1, 1);
+    }
+}
+
+// --- Leaf litter: fallen brown/orange leaves + a twig (forest-floor clutter) ---
+function drawLeafLitter(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 4);
+    const LEAF = [[150, 86, 38], [176, 120, 40], [132, 64, 30], [110, 92, 40]];
+    const leaves = 4 + (Math.random() * 4 | 0);
+    for (let i = 0; i < leaves; i++) {
+        const cx = ox + 1 + Math.random() * (w - 2);
+        const cy = oy + 1 + Math.random() * (h - 2);
+        const lc = LEAF[(Math.random() * LEAF.length) | 0];
+        const lr = Math.max(1, w * 0.1);
+        c.fillStyle = `rgba(${lc[0]},${lc[1]},${lc[2]},0.9)`;
+        c.beginPath(); c.ellipse(cx, cy, lr, lr * 0.55, Math.random() * Math.PI, 0, Math.PI * 2); c.fill();
+    }
+    if (Math.random() < 0.7) {
+        const tx = ox + 2 + Math.random() * (w - 4);
+        const ty = oy + 2 + Math.random() * (h - 4);
+        c.strokeStyle = "rgba(92,64,38,0.85)";
+        c.lineWidth = 1;
+        c.beginPath();
+        c.moveTo(tx, ty);
+        c.lineTo(tx + (Math.random() - 0.5) * w * 0.5, ty + (Math.random() - 0.5) * h * 0.4);
+        c.stroke();
+    }
+}
+
+// --- Wildflower meadow: dense mix of small multicolor blooms (regrowth payoff) ---
+function drawWildflowerMeadow(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const n = 5 + (Math.random() * 4 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 1 + Math.random() * (w - 2);
+        const cy = oy + 1 + Math.random() * (h - 2);
+        const fc = FLOWER_COLORS[(Math.random() * FLOWER_COLORS.length) | 0];
+        const pr = Math.max(0.8, w * 0.07);
+        c.fillStyle = `rgba(${fc[0]},${fc[1]},${fc[2]},0.95)`;
+        c.beginPath(); c.arc(cx, cy, pr, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(255,240,140,0.9)";
+        c.fillRect((cx - 0.5) | 0, (cy - 0.5) | 0, 1, 1);
+    }
+}
+
 // Weighted ground-cover picker — lush green growth dominates, specials are accents.
 function pickGrassVariant() {
     const r = Math.random();
-    if (r < 0.46) return (Math.random() * 10) | 0;        // 0-9  lush grass
-    if (r < 0.55) return 10 + (Math.random() * 3 | 0);    // 10-12 tall grass
-    if (r < 0.63) return 34 + (Math.random() * 3 | 0);    // 34-36 jungle plants (broadleaf/fern/ear)
-    if (r < 0.68) return 13 + (Math.random() * 3 | 0);    // 13-15 dry grass (rarer in a jungle)
-    if (r < 0.78) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
-    if (r < 0.82) return 23;    // fern
-    if (r < 0.855) return 28;   // flower patch
-    if (r < 0.88) return 29;    // lavender
-    if (r < 0.905) return 30;   // tulips
-    if (r < 0.925) return 31;   // pampas grass
-    if (r < 0.945) return 32;   // reeds
-    if (r < 0.958) return 22;   // clover
-    if (r < 0.972) return 24;   // shrub
-    if (r < 0.982) return 25;   // dandelion
-    if (r < 0.988) return 26;   // mushrooms
-    if (r < 0.997) return 27;   // berry bush
-    return GRASS_GLOWMUSH;      // glowing mushrooms (~0.3%)
+    if (r < 0.42) return (Math.random() * 10) | 0;        // 0-9  lush grass
+    if (r < 0.50) return 10 + (Math.random() * 3 | 0);    // 10-12 tall grass
+    if (r < 0.57) return 34 + (Math.random() * 3 | 0);    // 34-36 jungle plants (broadleaf/fern/ear)
+    if (r < 0.61) return 13 + (Math.random() * 3 | 0);    // 13-15 dry grass (rarer in a jungle)
+    if (r < 0.70) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
+    // --- richer flower / clutter band ---
+    if (r < 0.735) return GRASS_DAISY;        // 37 daisies
+    if (r < 0.765) return GRASS_BUTTERCUP;    // 40 buttercups
+    if (r < 0.795) return GRASS_POPPY;        // 38 poppies
+    if (r < 0.82)  return GRASS_MEADOW;       // 43 dense wildflower meadow
+    if (r < 0.84)  return GRASS_FIREWEED;     // 39 fireweed spikes
+    if (r < 0.865) return GRASS_LITTER;       // 42 leaf litter (clutter)
+    if (r < 0.885) return GRASS_PEBBLES;      // 41 pebbles (clutter)
+    // --- existing specials ---
+    if (r < 0.905) return 23;   // fern
+    if (r < 0.92)  return 28;   // flower patch
+    if (r < 0.93)  return 29;   // lavender
+    if (r < 0.942) return 30;   // tulips
+    if (r < 0.952) return 31;   // pampas grass
+    if (r < 0.962) return 32;   // reeds
+    if (r < 0.972) return 22;   // clover
+    if (r < 0.98)  return 24;   // shrub
+    if (r < 0.987) return 25;   // dandelion
+    if (r < 0.992) return 26;   // mushrooms
+    if (r < 0.998) return 27;   // berry bush
+    return GRASS_GLOWMUSH;      // glowing mushrooms (~0.2%)
+}
+
+// After a burn, ground regrows FLOWER-RICH: fireweed, poppies and meadows bloom
+// on the nutrient-rich ash before the forest slowly reclaims it.
+function pickRegrowthVariant() {
+    const r = Math.random();
+    if (r < 0.34) return (Math.random() * 10) | 0;        // 0-9 lush grass returns
+    if (r < 0.46) return GRASS_FIREWEED;                  // the signature post-fire bloom
+    if (r < 0.58) return GRASS_POPPY;
+    if (r < 0.70) return GRASS_MEADOW;
+    if (r < 0.80) return GRASS_DAISY;
+    if (r < 0.88) return GRASS_BUTTERCUP;
+    if (r < 0.94) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
+    return 10 + (Math.random() * 3 | 0);                  // 10-12 tall grass
 }
 
 // Rescan the grid for glowing-mushroom cells (cheap; runs on worldgen + ~1×/sec).
@@ -2262,6 +2439,9 @@ function update(dt = SIM_DT) {
     // same rates/timers at a quarter of the per-tick scan cost.
     const regrowGrass    = props.regrowth ? 0.00016 * props.regrowthRate : 0;
     const regrowTreeBase = props.regrowth ? 0.00016 * props.regrowthRate : 0;
+    // Scar weathering speed follows the regrowth-rate slider so cranking recovery
+    // heals the black/grey/bare stages faster too (floor keeps it from freezing).
+    const healStep = (dt * 4) * Math.max(0.5, props.regrowthRate);
     regrowPhase = (regrowPhase + 1) & 3;
     const sdt = dt * 4;
     for (let i = regrowPhase; i < grid.length; i += 4) {
@@ -2271,7 +2451,7 @@ function update(dt = SIM_DT) {
             // hot smouldering ash → cold charred earth (a lingering burn scar)
             if (burnTimer[i] <= 0) {
                 grid[i] = CHARRED;
-                burnTimer[i] = 1500 + Math.random() * 2400;   // scar lingers a while
+                burnTimer[i] = 700 + Math.random() * 900;   // fresh char, first of several scar stages
                 markStaticDirty();
                 continue;
             }
@@ -2291,9 +2471,42 @@ function update(dt = SIM_DT) {
                 });
             }
         } else if (s === CHARRED) {
-            // The scar slowly cools and heals back to bare earth, then regrows.
-            burnTimer[i] -= sdt;
-            if (burnTimer[i] <= 0) { grid[i] = DIRT; terrainRestoreDirt(i); }
+            // Fresh black char cools into a grey, ash-dusted bed.
+            burnTimer[i] -= healStep;
+            if (burnTimer[i] <= 0) {
+                grid[i] = CHAR_COOL;
+                burnTimer[i] = 900 + Math.random() * 1300;
+                markStaticDirty();
+            }
+        } else if (s === CHAR_COOL) {
+            // Ash weathers away, exposing bare scorched earth.
+            burnTimer[i] -= healStep;
+            if (burnTimer[i] <= 0) {
+                grid[i] = SCORCH;
+                burnTimer[i] = 1000 + Math.random() * 1500;
+                terrainRestoreDirt(i);   // clear pre-fire baked grass; scorch covers it opaquely
+                markStaticDirty();
+            }
+        } else if (s === SCORCH) {
+            // Bare burnt earth. With regrowth on, pioneers break through; otherwise
+            // it lingers as a barren scar (a natural firebreak / scorched wasteland).
+            if (regrowGrass > 0) {
+                burnTimer[i] -= healStep;
+                if (burnTimer[i] <= 0) {
+                    grid[i] = SPROUT;
+                    burnTimer[i] = 500 + Math.random() * 700;
+                    markStaticDirty();
+                }
+            }
+        } else if (s === SPROUT) {
+            // First green fills in → full grass. Burn scars regrow flower-rich
+            // (fireweed / poppies bloom after a fire).
+            burnTimer[i] -= healStep;
+            if (burnTimer[i] <= 0) {
+                grid[i] = GRASS;
+                grassVar[i] = pickRegrowthVariant();
+                terrainDrawGrass(i);
+            }
         } else if (s === DIRT && regrowGrass > 0) {
             if (Math.random() < regrowGrass * sdt) {
                 grid[i] = GRASS;
@@ -2809,6 +3022,15 @@ function bakeTerrain() {
 
 // Composite the cached terrain with the layers that DO change as cells burn/regrow
 // (grass tufts + ash). Cheap — no blur, just sprite blits.
+// Deterministic 0..1 hash for a cell seed + sub-index — lets a cell scatter
+// several stable details (no per-rebuild shimmer, no allocation).
+function hash01(seed, n) {
+    let h = (seed ^ Math.imul(n, 0x9e3779b9)) >>> 0;
+    h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
 function renderStaticLayer() {
     if (!staticCanvas) {
         staticCanvas = document.createElement("canvas");
@@ -2851,19 +3073,84 @@ function renderStaticLayer() {
                 sc.arc(ax, ay, Math.max(1, cell * 0.13), 0, Math.PI * 2);
                 sc.fill();
             } else if (s === CHARRED) {
-                // Cold blackened scorched earth — opaque (covers the green beneath),
-                // with deterministic charcoal mottle + cracks + sparse pale ash.
+                // Fresh black char — opaque, charcoal chunks + deep crack, with a
+                // faint warm ember still lurking in the crack.
                 const seed = (i * 2654435761) >>> 0;
-                sc.fillStyle = "#15110e";
+                sc.fillStyle = "#140f0c";
                 sc.fillRect(px, py, cell, cell);
-                sc.fillStyle = "rgba(46,40,35,0.55)";       // charcoal lump
-                sc.fillRect(px + (seed % (cell || 1)), py + ((seed >> 4) % (cell || 1)),
-                            Math.max(1, (cell * 0.34) | 0), Math.max(1, (cell * 0.34) | 0));
-                sc.fillStyle = "rgba(6,4,3,0.85)";          // crack
-                sc.fillRect(px + ((seed >> 8) % (cell || 1)), py, 1, cell);
-                if ((seed & 3) === 0) {                      // pale ash fleck
-                    sc.fillStyle = "rgba(135,125,114,0.55)";
-                    sc.fillRect(px + ((seed >> 11) % (cell || 1)), py + ((seed >> 14) % (cell || 1)), 1, 1);
+                sc.fillStyle = "rgba(48,41,36,0.6)";        // charcoal chunk
+                sc.fillRect(px + hash01(seed, 1) * cell * 0.6, py + hash01(seed, 2) * cell * 0.6,
+                            Math.max(1, (cell * 0.36) | 0), Math.max(1, (cell * 0.34) | 0));
+                sc.fillStyle = "rgba(33,27,23,0.6)";
+                sc.fillRect(px + hash01(seed, 3) * cell * 0.7, py + hash01(seed, 4) * cell * 0.7,
+                            Math.max(1, (cell * 0.28) | 0), Math.max(1, (cell * 0.26) | 0));
+                sc.fillStyle = "rgba(4,3,2,0.9)";           // deep crack
+                sc.fillRect((px + hash01(seed, 5) * cell) | 0, py, 1, cell);
+                if ((seed & 7) < 3) {                        // warm ember in the crack
+                    sc.fillStyle = "rgba(156,48,12,0.5)";
+                    sc.fillRect((px + hash01(seed, 6) * cell) | 0, py + hash01(seed, 7) * cell,
+                                1, Math.max(1, (cell * 0.32) | 0));
+                }
+            } else if (s === CHAR_COOL) {
+                // Cooled grey charcoal + settled ash — warmth gone, pale ash dusts it.
+                const seed = (i * 2654435761) >>> 0;
+                sc.fillStyle = "#272019";
+                sc.fillRect(px, py, cell, cell);
+                sc.fillStyle = "rgba(76,69,61,0.6)";        // grey charcoal lump
+                sc.fillRect(px + hash01(seed, 1) * cell * 0.6, py + hash01(seed, 2) * cell * 0.6,
+                            Math.max(1, (cell * 0.34) | 0), Math.max(1, (cell * 0.3) | 0));
+                sc.fillStyle = "rgba(15,11,9,0.8)";         // black bit
+                sc.fillRect(px + hash01(seed, 3) * cell * 0.8, py + hash01(seed, 4) * cell * 0.8,
+                            Math.max(1, (cell * 0.2) | 0), Math.max(1, (cell * 0.2) | 0));
+                sc.fillStyle = "rgba(170,162,150,0.5)";     // pale ash dusting
+                for (let a = 0; a < 4; a++) {
+                    sc.fillRect((px + hash01(seed, 10 + a) * cell) | 0,
+                                (py + hash01(seed, 20 + a) * cell) | 0, 1, 1);
+                }
+            } else if (s === SCORCH) {
+                // Bare scorched earth — burnt-umber dirt, charcoal flecks, faint crack.
+                const seed = (i * 2654435761) >>> 0;
+                sc.fillStyle = "#3a2a1c";
+                sc.fillRect(px, py, cell, cell);
+                sc.fillStyle = "rgba(88,65,44,0.45)";       // recovering-dirt mottle
+                sc.fillRect(px + hash01(seed, 1) * cell * 0.6, py + hash01(seed, 2) * cell * 0.6,
+                            Math.max(1, (cell * 0.4) | 0), Math.max(1, (cell * 0.34) | 0));
+                sc.fillStyle = "rgba(20,14,10,0.8)";        // charcoal flecks
+                for (let a = 0; a < 3; a++) {
+                    sc.fillRect((px + hash01(seed, 5 + a) * cell) | 0,
+                                (py + hash01(seed, 8 + a) * cell) | 0, 1, 1);
+                }
+                sc.fillStyle = "rgba(28,18,10,0.55)";       // crack
+                sc.fillRect(px, (py + hash01(seed, 15) * cell) | 0, cell, 1);
+                if ((seed & 3) === 0) {                      // pale ash bit
+                    sc.fillStyle = "rgba(150,140,126,0.4)";
+                    sc.fillRect((px + hash01(seed, 16) * cell) | 0, (py + hash01(seed, 17) * cell) | 0, 1, 1);
+                }
+            } else if (s === SPROUT) {
+                // Pioneer regrowth — scorched dirt with first moss + tiny green sprouts.
+                const seed = (i * 2654435761) >>> 0;
+                sc.fillStyle = "#3f2f20";                   // slightly recovered earth
+                sc.fillRect(px, py, cell, cell);
+                sc.fillStyle = "rgba(24,16,11,0.7)";        // lingering charcoal fleck
+                sc.fillRect((px + hash01(seed, 1) * cell) | 0, (py + hash01(seed, 2) * cell) | 0, 1, 1);
+                sc.fillStyle = "rgba(72,112,46,0.55)";      // moss patch
+                sc.fillRect(px + hash01(seed, 3) * cell * 0.6, py + cell * 0.5 + hash01(seed, 4) * cell * 0.4,
+                            Math.max(1, (cell * 0.3) | 0), Math.max(1, (cell * 0.22) | 0));
+                const sprouts = 3 + ((seed >> 5) & 1) + ((seed >> 6) & 1);
+                sc.strokeStyle = "rgba(98,152,58,0.85)";    // tiny green sprout blades
+                sc.lineWidth = 1;
+                sc.beginPath();
+                for (let a = 0; a < sprouts; a++) {
+                    const sxp = px + hash01(seed, 30 + a) * cell;
+                    const syb = py + cell - 1;
+                    const sh  = Math.max(2, cell * (0.22 + hash01(seed, 40 + a) * 0.2));
+                    sc.moveTo(sxp, syb);
+                    sc.lineTo(sxp + (hash01(seed, 50 + a) - 0.5) * 2, syb - sh);
+                }
+                sc.stroke();
+                if ((seed & 7) === 0) {                      // first pioneer flower bud
+                    sc.fillStyle = (seed & 8) ? "rgba(232,90,120,0.9)" : "rgba(248,210,90,0.9)";
+                    sc.fillRect((px + hash01(seed, 60) * cell) | 0, (py + hash01(seed, 61) * cell * 0.6) | 0, 1, 1);
                 }
             }
         }
