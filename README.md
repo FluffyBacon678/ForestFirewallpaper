@@ -14,6 +14,13 @@ Features:
   the year actually *shows* spring/summer/autumn/winter instead of sitting in a
   permanent half-blend. Leave it on **Auto-cycle** (set the length of each season)
   or pin a single season from the Wallpaper Engine panel; snow intensity is adjustable.
+- **Seasons drive the world, not just its colour** — winter snow **damps fire
+  spread** (a frozen forest barely catches) while high summer fans it; **pink
+  blossoms** bud on the tree canopies in spring; and **wildlife** (birds, fireflies)
+  swells in spring/summer and thins toward winter.
+- **Interactive** — left-click (or hold to pour) starts a wildfire at the cursor;
+  **right-click drops a rain burst** that puts fires out with steam; **scroll the
+  mouse wheel to zoom**. All three are individually toggleable.
 - Procedural noise terrain (biomes, clearings, dense pockets)
 - Rivers, ponds, shoreline tree reflections — smooth blurred-mask shorelines
   (deep water → shallow rim, no blocky/circle edges). Optional lily pads with
@@ -136,22 +143,34 @@ wildfire ~4.7 ms, a calm forest with no wind ~1.6 ms, and a worst-case 700+ cell
 inferno ~9 ms — all inside the 120 fps budget, with most of the day spent far
 under it. Sim ticks run in well under 0.2 ms.
 
-### 4K / high-DPI
+### 4K / high-DPI & frame pacing
 
 The biggest cost is redrawing the swaying tree canopy, which scales with the
-number of on-screen trees. At native 4K a 10 px cell would pack **4× the trees**
-of 1080p (and render them microscopically), so **"Scale detail with resolution"**
-(on by default) grows the internal cell size with the display — a 4K screen
-renders the same physical tree size and density as 1080p (≈¼ the trees), keeping
-the tree-layer cost flat across resolutions. If you *want* true-pixel density at
-4K, turn it off (and expect a much heavier load). Other 4K levers: raise **Zoom**,
-drop **Quality preset** to Medium/Low, or lower **Tree density** / **Map size**.
+number of on-screen trees. Two things keep it smooth at 4K:
+
+- **"Scale detail with resolution"** (on by default) grows the internal cell size
+  with the display, so a 4K screen renders the same physical tree size and density
+  as 1080p (≈¼ the trees) instead of 4× of everything rendered microscopically.
+  Turn it off for true-pixel 4K (much heavier).
+- **Amortized tree rebuild** — the canopy is refreshed **one horizontal band per
+  frame** (clipped, redrawing any tree whose canopy reaches into the band) rather
+  than the whole window at once, so there's no periodic rebuild spike. Tree
+  changes (burn/sprout) ride the same banded path. Result: even on a weak GPU at
+  4K, an active wildfire holds a flat ~9 ms/frame with no hitches; on the target
+  RTX 2070 it's well under the 60 fps budget at every resolution.
+
+Other 4K levers: raise **Zoom**, drop **Quality preset** to Medium/Low (Low also
+widens the rebuild bands and drops the fire-glow bloom), or lower **Tree density**
+/ **Map size**.
 
 Key optimizations:
 - **Two-tier baked layers**: the worldgen-static terrain (dirt, smooth water,
   paths, lily pads, rocks, grass) is baked once per world; the per-fire static
-  layer (terrain blit + ash) rebuilds in well under a millisecond, so wildfires
-  never hitch even though the smooth-water blur costs ~12 ms (world regen only)
+  (ash/scar) layer only refreshes its **visible window** (+ a pan margin), so a
+  wildfire's scar updates cost the same whether the world is 1080p or 4K
+- **Half-resolution water blur** — the one-time terrain bake builds the soft
+  shoreline mask at half-res and upscales it, cutting the worldgen/resize/zoom
+  hitch substantially (the blur was its single biggest cost)
 - **Visible-region tree layer** — the swaying-tree layer only re-renders the
   on-screen window (+ a pan margin), not the whole oversized world, and blits
   trees 1:1 from a pre-scaled 20-bucket size atlas instead of scaling every
@@ -255,7 +274,7 @@ Organized into sections in the Wallpaper Engine picker:
 | Atmosphere | Birds, Fireflies, Fish shadows, Screen effects toggle, Wind gusts, Starter fire on load |
 | Audio reactivity | React to system audio, Audio strength |
 | RGB lighting | RGB edge mode, RGB edge strength |
-| Interaction | Mouse interaction, Click ignition radius, Show ignition radius hint, Reset world |
+| Interaction | Mouse interaction, Click ignition radius, Show ignition radius hint, Hold to pour fire, Right-click rain burst, Mouse-wheel zoom, Reset world |
 | Debug | Debug overlay (FPS + particle counts) |
 
 ## License

@@ -64,6 +64,9 @@ const props = {
     regrowthRate:      1.0,
     mouseInteraction:  true,
     igniteRadius:      2,
+    rightClickDouse:   true,   // right-click = rain burst that puts fires out
+    scrollZoom:        true,   // mouse wheel zooms (adjusts cell size)
+    holdToPour:        true,   // holding the button keeps pouring fire at the cursor
     debugOverlay:      false,
     // Seasons — a slow year cycle that re-colours the whole forest
     season:            "auto",  // auto / spring / summer / autumn / winter
@@ -338,7 +341,10 @@ let grassSprites = null;
 // frame, so they're rendered into this offscreen canvas and rebuilt only every
 // few frames (the per-tree sway is slow enough that this looks smooth).
 let treeLayerCanvas = null, treeLayerCtx = null, treeLayerCountdown = 0;
-let treeLayerCamX = 0, treeLayerCamY = 0;       // camera pos at last rebuild (jump guard)
+let treeLayerCamX = 0, treeLayerCamY = 0;       // camera pos at last FULL rebuild (jump guard)
+let treeBandPhase = 0, treeBandTick = 0;        // amortized rebuild: which band, cadence counter
+let treeContentDirty = 0;                       // frames of fast banded refresh after a tree changed
+let treePrevCamX = 0, treePrevCamY = 0;         // camera last frame (motion detection)
 const treeSinTab = new Float32Array(320);       // per-rebuild sway offsets (treeVar × i&31)
 // Sway is a ~1px, ~2s oscillation drawn at integer positions — sampling it every
 // 2nd frame (30Hz at 60fps, 60Hz at 120fps) is visually identical to every frame
@@ -353,9 +359,13 @@ let jitterX, jitterY;
 let staticCanvas = null;
 let staticCtx    = null;
 let staticDirty  = true;
-// Offscreen mask for smooth (blurred) water shorelines
+// Offscreen mask for smooth (blurred) water shorelines (built at half-res — the
+// blur is the dominant cost of the one-time terrain bake, so quartering its area
+// + halving its radius and upscaling cuts the bake ~3-4× with no visible change)
 let waterMask    = null;
 let waterMaskCtx = null;
+let waterMaskBlur = null;
+let waterMaskBlurCtx = null;
 // Terrain layer (dirt + water + paths + lily pads + rocks) — baked once per worldgen,
 // since none of it changes when cells burn/regrow. Keeps the expensive water blur
 // out of the per-grid-change static rebuild.
@@ -363,6 +373,8 @@ let terrainCanvas = null;
 let terrainCtx    = null;
 let terrainDirty  = true;
 let staticThrottle = 0;
+let staticCamX = -1e9, staticCamY = -1e9;  // camera at last static rebuild (visible-region refresh)
+let staticForceFull = true;                // next rebuild does the whole world (worldgen/resize)
 const STATIC_REBUILD_MIN_GAP = 3; // re-bake at most every N frames even if dirty
 
 // FPS + fixed-timestep simulation
@@ -393,6 +405,8 @@ let lastRenderMs  = 0;
 
 // Quality multiplier for particle caps (Low/Medium/High/Ultra)
 let qMul = 1.0;
+let qBandMul = 1.0;    // tree-rebuild band spread (higher = cheaper/frame, slower sway)
+let qGlowBlur = true;  // soft fire-glow bloom (off on Low)
 
 // Audio reactivity — set by Wallpaper Engine's audio listener (0..1 average)
 let audioLevel = 0;
@@ -412,11 +426,13 @@ const SEASON_IDX = { spring: 0, summer: 1, autumn: 2, winter: 3 };
 // desat = greyscale pull, snow/ice 0..1, leaf = ambient-leaf spawn factor,
 // leafTint = override colour for drifting leaves (blossom/leaf-fall), bright =
 // screen-white lift. Summer is deliberately neutral (the most "untouched" look).
+// fireMul = fire-spread multiplier (winter snow damps, summer fans); life = wildlife
+// density (birds/fireflies); blossom = pink canopy blossoms (spring only).
 const SEASON_KF = [
-    { tr: 150, tg: 240, tb: 150, ta: 0.18, mode: "soft-light", desat: 0.00, snow: 0.0,  ice: 0.0,  leaf: 0.85, leafTint: [244, 156, 196], bright: 0.09 }, // spring — fresh green + pink blossom
-    { tr: 255, tg: 244, tb: 205, ta: 0.00, mode: "soft-light", desat: 0.00, snow: 0.0,  ice: 0.0,  leaf: 0.12, leafTint: null,            bright: 0.00 }, // summer — neutral / peak lush
-    { tr: 240, tg: 142, tb: 50,  ta: 0.32, mode: "soft-light", desat: 0.06, snow: 0.0,  ice: 0.0,  leaf: 1.00, leafTint: [180, 88, 28],   bright: 0.00 }, // autumn — gold/red + leaf-fall
-    { tr: 158, tg: 188, tb: 228, ta: 0.22, mode: "soft-light", desat: 0.55, snow: 1.0,  ice: 0.85, leaf: 0.00, leafTint: null,            bright: 0.06 }, // winter — snow + frost
+    { tr: 150, tg: 240, tb: 150, ta: 0.18, mode: "soft-light", desat: 0.00, snow: 0.0,  ice: 0.0,  leaf: 0.85, leafTint: [244, 156, 196], bright: 0.09, fireMul: 1.00, life: 1.25, blossom: 1.0 }, // spring
+    { tr: 255, tg: 244, tb: 205, ta: 0.00, mode: "soft-light", desat: 0.00, snow: 0.0,  ice: 0.0,  leaf: 0.12, leafTint: null,            bright: 0.00, fireMul: 1.18, life: 1.00, blossom: 0.0 }, // summer
+    { tr: 240, tg: 142, tb: 50,  ta: 0.32, mode: "soft-light", desat: 0.06, snow: 0.0,  ice: 0.0,  leaf: 1.00, leafTint: [180, 88, 28],   bright: 0.00, fireMul: 1.00, life: 0.70, blossom: 0.0 }, // autumn
+    { tr: 158, tg: 188, tb: 228, ta: 0.22, mode: "soft-light", desat: 0.55, snow: 1.0,  ice: 0.85, leaf: 0.00, leafTint: null,            bright: 0.06, fireMul: 0.42, life: 0.15, blossom: 0.0 }, // winter
 ];
 function lerpN(a, b, t) { return a + (b - a) * t; }
 
@@ -433,12 +449,15 @@ let mouseInside = false;
 let lightningGlows = [];
 
 function applyQuality(q) {
+    // qMul scales particle caps; qBandMul spreads the tree-canopy rebuild over more
+    // frames (cheaper per frame, slower sway) on weaker tiers; qGlowBlur drops the
+    // soft fire-glow bloom on Low. Render cost — not just particle count — scales.
     switch (q) {
-        case "low":    qMul = 0.40; break;
-        case "medium": qMul = 0.70; break;
-        case "high":   qMul = 1.00; break;
-        case "ultra":  qMul = 1.60; break;
-        default:       qMul = 1.00;
+        case "low":    qMul = 0.40; qBandMul = 2.0; qGlowBlur = false; break;
+        case "medium": qMul = 0.70; qBandMul = 1.5; qGlowBlur = true;  break;
+        case "high":   qMul = 1.00; qBandMul = 1.0; qGlowBlur = true;  break;
+        case "ultra":  qMul = 1.60; qBandMul = 1.0; qGlowBlur = true;  break;
+        default:       qMul = 1.00; qBandMul = 1.0; qGlowBlur = true;
     }
 }
 
@@ -1750,6 +1769,48 @@ function igniteAt(px, py, radius) {
     return n;
 }
 
+// Right-click rain burst — extinguish burning cells in a radius (→ steam + ash)
+// and throw down a handful of rain drops for feedback.
+function douseAt(px, py, radius) {
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
+    const cx = (px / cell) | 0, cy = (py / cell) | 0, r = Math.max(2, radius | 0);
+    for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy > r * r) continue;
+            const nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            const i = idx(nx, ny), s = grid[i];
+            if (s !== BURN_GRASS && s !== BURN_TREE) continue;
+            const isTree = s === BURN_TREE;
+            grid[i] = isTree ? ASH_TREE : ASH_GRASS;
+            burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;
+            burningCount--;
+            markStaticDirty();
+            if (isTree) treeContentDirty = 12;
+            if (smokeParticles.length < MAX_SMOKE) {
+                smokeParticles.push({
+                    x: nx * cell + cell * 0.5, y: ny * cell + cell * 0.5,
+                    vx: (Math.random() - 0.5) * 0.6, vy: -1.0 - Math.random() * 0.6,
+                    life: 0.6, size: 5 + Math.random() * 3, grow: 0.3,
+                    shade: 210 + (Math.random() * 40 | 0),
+                });
+            }
+        }
+    }
+    // Visible rain burst over the spot
+    const wxF = Math.cos(windAngle);
+    const dropN = 12 + r * r, rainCap = (MAX_RAIN * qMul) | 0;
+    for (let k = 0; k < dropN && rainDrops.length < rainCap; k++) {
+        rainDrops.push({
+            x: px + (Math.random() - 0.5) * r * cell * 2,
+            y: py + (Math.random() - 0.5) * r * cell * 2 - 30 - Math.random() * 60,
+            vx: wxF * 1.5 * props.windStrength + (Math.random() - 0.5),
+            vy: 8 + Math.random() * 4,
+            len: 6 + Math.random() * 6,
+        });
+    }
+}
+
 function randomSpark() {
     // Strike anywhere in the world (world pixel coordinates).
     for (let attempt = 0; attempt < 30; attempt++) {
@@ -1982,6 +2043,9 @@ function computeSeasonParams() {
     s.ice    = lerpN(A.ice, B.ice, f);
     s.leaf   = lerpN(A.leaf, B.leaf, f);
     s.bright = lerpN(A.bright, B.bright, f);
+    s.fireMul = lerpN(A.fireMul, B.fireMul, f);
+    s.life    = lerpN(A.life, B.life, f);
+    s.blossom = lerpN(A.blossom, B.blossom, f);
     s.mode   = (A.ta >= B.ta) ? A.mode : B.mode;
     const l0 = A.leafTint, l1 = B.leafTint;
     if (l0 && l1)      s.leafTint = [lerpN(l0[0], l1[0], f), lerpN(l0[1], l1[1], f), lerpN(l0[2], l1[2], f)];
@@ -2270,7 +2334,7 @@ function updateRain(dt) {
                             burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;
                             burningCount--;
                             markStaticDirty();
-                            if (isTree) treeLayerCountdown = 0;   // tree vanished → refresh layer
+                            if (isTree) treeContentDirty = 12;    // tree vanished → fast banded refresh (no full-rebuild spike)
                             // Steam puff
                             if (smokeParticles.length < MAX_SMOKE) {
                                 smokeParticles.push({
@@ -2394,6 +2458,11 @@ function spawnLeaf() {
 // ============================================================
 function update(dt = SIM_DT) {
     simClock += dt;
+    // Hold-to-pour — keep igniting at the cursor while the button is held (not just
+    // on move), so holding still pours a growing fire.
+    if (mouseDown && props.holdToPour && props.mouseInteraction && mouseInside) {
+        igniteAt(mouseX + camX, mouseY + camY, props.igniteRadius);
+    }
     // Wind — base + gust burst, audio bass also nudges strength briefly
     windAngle += 0.003 * props.windRotation * dt;
     const effectiveWind = props.windStrength + gustStrength + (props.audioReactive ? audioBass * 0.6 : 0);
@@ -2403,8 +2472,9 @@ function update(dt = SIM_DT) {
     const wxN = wxF * wMag;
     const wyN = wyF * wMag;
 
-    // Fire spread also responds to weather: drought fans it, wet damps it.
-    const fireMul = weatherFireMul();
+    // Fire spread responds to weather (drought fans, wet damps) AND season — a
+    // snow-covered winter forest barely catches; high summer is a tinderbox.
+    const fireMul = weatherFireMul() * (seasonParam ? seasonParam.fireMul : 1);
     const sg = BASE_SPREAD_GRASS * props.spreadRate * fireMul;
     const st = BASE_SPREAD_TREE  * props.spreadRate * fireMul;
 
@@ -2440,7 +2510,7 @@ function update(dt = SIM_DT) {
             fireHeat[i] = 0;
             burningCount--;
             markStaticDirty(); // grass tuft → ash patch baked
-            if (isTree) treeLayerCountdown = 0;   // tree vanished → refresh layer
+            if (isTree) treeContentDirty = 12;    // tree vanished → fast banded refresh (no full-rebuild spike)
             continue;
         }
 
@@ -2679,7 +2749,7 @@ function update(dt = SIM_DT) {
                     grid[i] = TREE;
                     treeVar[i] = pickTreeVariant();
                     treeGrowth[i] = 0.12 + Math.random() * 0.08; // starts as a sapling
-                    treeLayerCountdown = 0;   // new sapling → refresh layer
+                    treeContentDirty = 12;   // new sapling → fast banded refresh
                     // grass tuft already baked under the new tree — no terrain edit needed
                 }
             }
@@ -2731,8 +2801,10 @@ function update(dt = SIM_DT) {
 
     // Bird flocks — spawn rarely, drift across (skip in storms)
     // Birds keep clear of heavy weather (monsoon / storm)
+    // Wildlife thins toward winter and swells in spring (seasonParam.life).
+    const seasonLife = seasonParam ? seasonParam.life : 1;
     if (props.showBirds && weatherCurrent < WEATHER_MONSOON
-        && birds.length < (60 * qMul) | 0 && Math.random() < 0.0008 * dt) spawnBirdFlock();
+        && birds.length < ((60 * qMul * seasonLife) | 0) && Math.random() < 0.0008 * dt * seasonLife) spawnBirdFlock();
     if (birds.length) {
         const minX = -60, maxX = worldPxW + 60;
         const minY = -60, maxY = worldPxH + 60;
@@ -2786,7 +2858,7 @@ function update(dt = SIM_DT) {
     }
 
     // Fireflies — slowly populate up to a target count, drift gently with phase glow
-    const TARGET_FIREFLIES = props.showFireflies ? ((40 * qMul) | 0) : 0;
+    const TARGET_FIREFLIES = props.showFireflies ? ((40 * qMul * seasonLife) | 0) : 0;
     if (fireflies.length < TARGET_FIREFLIES && Math.random() < 0.05 * dt) spawnFirefly();
     if (!props.showFireflies && fireflies.length) fireflies = [];
     if (fireflies.length) {
@@ -2968,7 +3040,7 @@ function update(dt = SIM_DT) {
 // Static-layer cache (water/paths/grass/rocks/ash baked together)
 // ============================================================
 function markStaticDirty() { staticDirty = true; }
-function markTerrainDirty() { terrainDirty = true; staticDirty = true; }
+function markTerrainDirty() { terrainDirty = true; staticDirty = true; staticForceFull = true; }
 
 // Incremental terrain edits — update a single cell on the baked terrain canvas
 // instead of re-baking the whole thing (which includes the costly water blur).
@@ -3024,18 +3096,25 @@ function bakeTerrain() {
     // Smooth water via an offscreen blurred mask — eliminates per-cell disc
     // scalloping. Build a binary water-cell rect mask, blur it, and composite
     // layers from larger (shore) to smaller (deep) so the shoreline is even.
+    // Half-resolution mask + blur buffer (see note at the declaration).
+    const hw = Math.max(1, Math.ceil(w / 2)), hh = Math.max(1, Math.ceil(h / 2));
     if (!waterMask) {
         waterMask = document.createElement("canvas");
         waterMaskCtx = waterMask.getContext("2d");
+        waterMaskBlur = document.createElement("canvas");
+        waterMaskBlurCtx = waterMaskBlur.getContext("2d");
     }
-    if (waterMask.width !== w || waterMask.height !== h) {
-        waterMask.width = w; waterMask.height = h;
+    if (waterMask.width !== hw || waterMask.height !== hh) {
+        waterMask.width = hw; waterMask.height = hh;
+        waterMaskBlur.width = hw; waterMaskBlur.height = hh;
     }
-    const mc = waterMaskCtx;
-    const blurPx = Math.max(1, (cell * 0.42) | 0);
+    const mc = waterMaskCtx, wb = waterMaskBlurCtx;
+    const blurHalf = Math.max(1, ((cell * 0.42) | 0) >> 1);   // blur radius in half-res space
 
-    // Reusable: fill a set of cells (predicate) as overlapping rects on the mask
+    // Fill a set of cells (predicate) as overlapping rects on the half-res mask
+    // (the 0.5 transform maps world coords → the half-size canvas).
     const paintMask = (color, predicate, pad) => {
+        mc.setTransform(0.5, 0, 0, 0.5, 0, 0);
         mc.clearRect(0, 0, w, h);
         mc.fillStyle = color;
         for (let y = 0; y < rows; y++) {
@@ -3046,19 +3125,8 @@ function bakeTerrain() {
                 mc.fillRect(x * cell - pad, y * cell - pad, cell + pad * 2, cell + pad * 2);
             }
         }
+        mc.setTransform(1, 0, 0, 1, 0, 0);
     };
-
-    // 1) Shallow halo — all water cells, blurred → smooth soft outer shape
-    paintMask(WATER_SHALLOW, null, 1);
-    sc.save();
-    sc.filter = `blur(${blurPx}px)`;
-    sc.drawImage(waterMask, 0, 0);
-    // draw twice to firm up opacity (blur thins it out)
-    sc.drawImage(waterMask, 0, 0);
-    sc.restore();
-
-    // 2) Deep body — interior cells only (erode by 1), blurred → soft deep,
-    //    leaving an even shallow rim at the shore
     const isInterior = (x, y) => {
         for (let d = 0; d < NEIGHBOURS.length; d++) {
             const nx = x + NEIGHBOURS[d][0];
@@ -3068,20 +3136,25 @@ function bakeTerrain() {
         }
         return true;
     };
-    paintMask(WATER_DEEP, isInterior, 1);
-    sc.save();
-    sc.filter = `blur(${blurPx}px)`;
-    sc.drawImage(waterMask, 0, 0);
-    sc.drawImage(waterMask, 0, 0);
-    sc.restore();
+    // Paint a layer's mask, blur it at half-res, then upscale it onto the terrain.
+    const blurLayer = (color, predicate, alpha, draws) => {
+        paintMask(color, predicate, 1);
+        wb.clearRect(0, 0, hw, hh);
+        wb.save();
+        wb.filter = `blur(${blurHalf}px)`;
+        for (let d = 0; d < draws; d++) wb.drawImage(waterMask, 0, 0);  // firm up opacity
+        wb.restore();
+        sc.save();
+        if (alpha < 1) sc.globalAlpha = alpha;
+        sc.imageSmoothingEnabled = true;
+        for (let d = 0; d < draws; d++) sc.drawImage(waterMaskBlur, 0, 0, hw, hh, 0, 0, w, h);
+        sc.restore();
+    };
 
-    // 3) Greenish reflection where trees overhang — interior reflect cells, blurred
-    paintMask(WATER_DEEP_REFLECT, (x, y, i) => isInterior(x, y) && (waterPhase[i] & 0x10), 1);
-    sc.save();
-    sc.filter = `blur(${blurPx}px)`;
-    sc.globalAlpha = 0.85;
-    sc.drawImage(waterMask, 0, 0);
-    sc.restore();
+    // 1) Shallow halo (all water) → 2) deep interior body → 3) greenish reflection
+    blurLayer(WATER_SHALLOW, null, 1, 2);
+    blurLayer(WATER_DEEP, isInterior, 1, 2);
+    blurLayer(WATER_DEEP_REFLECT, (x, y, i) => isInterior(x, y) && (waterPhase[i] & 0x10), 0.85, 1);
     // 4) Lily pads
     for (let y = 0; y < rows; y++) {
         const rowBase = y * cols;
@@ -3224,6 +3297,7 @@ function renderStaticLayer() {
     if (staticCanvas.width !== worldPxW || staticCanvas.height !== worldPxH) {
         staticCanvas.width  = worldPxW;
         staticCanvas.height = worldPxH;
+        staticForceFull = true;   // fresh canvas → bake the whole thing once
     }
     if (terrainDirty) bakeTerrain();
 
@@ -3232,13 +3306,27 @@ function renderStaticLayer() {
     const h = staticCanvas.height;
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
-    sc.clearRect(0, 0, w, h);
-    sc.drawImage(terrainCanvas, 0, 0);
+    // Refresh only the VISIBLE world window (+ margin) — off-screen scars are
+    // never composited, and panning to a new area triggers another rebuild. A
+    // full-world refresh only runs on worldgen/resize (staticForceFull).
+    const vw = canvas.width, vh = canvas.height;
+    const SM = cell * 2 + 220;
+    let sx0, sy0, sx1, sy1;
+    if (staticForceFull) { sx0 = 0; sy0 = 0; sx1 = w; sy1 = h; }
+    else {
+        sx0 = Math.max(0, (camX - SM) | 0); sy0 = Math.max(0, (camY - SM) | 0);
+        sx1 = Math.min(w, (camX + vw + SM) | 0); sy1 = Math.min(h, (camY + vh + SM) | 0);
+    }
+    sc.clearRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
+    sc.drawImage(terrainCanvas, sx0, sy0, sx1 - sx0, sy1 - sy0, sx0, sy0, sx1 - sx0, sy1 - sy0);
+    staticCamX = camX; staticCamY = camY; staticForceFull = false;
 
     // ---- Burn states: smouldering ash, then cold charred-earth scars ----
-    for (let y = 0; y < rows; y++) {
+    const scx0 = Math.max(0, (sx0 / cell) | 0), scx1 = Math.min(cols - 1, Math.ceil(sx1 / cell));
+    const scy0 = Math.max(0, (sy0 / cell) | 0), scy1 = Math.min(rows - 1, Math.ceil(sy1 / cell));
+    for (let y = scy0; y <= scy1; y++) {
         const rowBase = y * cols;
-        for (let x = 0; x < cols; x++) {
+        for (let x = scx0; x <= scx1; x++) {
             const i = rowBase + x;
             const s = grid[i];
             const px = x * cell;
@@ -3406,7 +3494,10 @@ function render() {
     updateCamera();
 
     // Background: cached static layer (dirt + water + paths + grass + rocks + ash)
-    if (staticDirty && staticThrottle <= 0) renderStaticLayer();
+    // Rebuild on a scar change OR when the camera has panned far enough to reveal
+    // un-baked world (the static layer now only refreshes its visible window).
+    const staticMoved = Math.abs(camX - staticCamX) > 180 || Math.abs(camY - staticCamY) > 180;
+    if ((staticDirty || staticMoved) && staticThrottle <= 0) renderStaticLayer();
     if (staticThrottle > 0) staticThrottle--;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -3611,23 +3702,19 @@ function render() {
         treeLayerCanvas.width = worldPxW; treeLayerCanvas.height = worldPxH;
         treeLayerCountdown = 0;
     }
-    // If a slider jump teleports the camera further than the rebuild margin,
-    // refresh immediately so no blank strip can reach the screen.
-    if (Math.abs(camX - treeLayerCamX) > 48 || Math.abs(camY - treeLayerCamY) > 48) {
+    // Big slider/teleport jump → refresh the whole layer at once so no blank
+    // strip can reach the screen. Small continuous pan is covered by the banded
+    // refresh below + the generous margin, so the threshold is loose.
+    if (Math.abs(camX - treeLayerCamX) > 220 || Math.abs(camY - treeLayerCamY) > 220) {
         treeLayerCountdown = 0;
     }
-    if (treeLayerCountdown <= 0) {
+    {
         const tlc = treeLayerCtx;
-        // Full-canvas clear (one cheap GPU fill), then draw ONLY the trees that
-        // can reach the visible window (+ margin). No clip state — clipping
-        // forces slow paths in some canvas backends. Off-screen stays blank;
-        // the margin + the jump guard above keep blanks off the screen.
-        tlc.clearRect(0, 0, worldPxW, worldPxH);
         tlc.imageSmoothingEnabled = false;   // 1:1 blits — no resampling needed
-        treeLayerCamX = camX; treeLayerCamY = camY;
-
         const maxDw = treeScaledCellW, maxDh = treeScaledCellH;
-        const MX = (maxDw >> 1) + 64, MY = maxDh + 64;
+        // Generous margin: covers sprite overhang + a few frames of pan drift so
+        // banded refresh never leaves a blank leading edge while scrolling.
+        const MX = (maxDw >> 1) + 160, MY = maxDh + 160;
         const rx0 = Math.max(0, (camX - MX) | 0);
         const ry0 = Math.max(0, (camY - MY) | 0);
         const rx1 = Math.min(worldPxW, (camX + w + MX) | 0);
@@ -3636,46 +3723,95 @@ function render() {
         const swayScale = Math.min(1.4, props.windStrength) * cell * 0.10;
         const swayWxF = Math.cos(windAngle);
         const swayT = renderTimeSec * 3.0;
-        // Sway phases only depend on (treeVar, i&31): 320 combos — precompute
-        // the final x-offsets once instead of a Math.sin per tree.
+        const swaying = swayScale >= 0.5;
+        // Sway changes every frame, so the banded refresh needs a current table.
         for (let k = 0; k < 320; k++) {
             treeSinTab[k] = swayWxF * Math.sin(swayT + (k >> 5) * 0.4 + (k & 31) * 0.21) * swayScale;
         }
-        // Cell bounds for every tree whose sprite can reach into the region
         const cx0 = Math.max(0, ((rx0 - maxDw / 2 - cell) / cell) | 0);
         const cx1 = Math.min(cols - 1, Math.ceil((rx1 + maxDw / 2 + cell) / cell));
         const cy0 = Math.max(0, ((ry0 - cell) / cell) | 0);
         const cy1 = Math.min(rows - 1, Math.ceil((ry1 + maxDh + cell) / cell));
         const B1 = TREE_SIZE_BUCKETS - 1;
-        for (let y = cy0; y <= cy1; y++) {
-            const rowBase = y * cols;
-            for (let x = cx0; x <= cx1; x++) {
-                const i = rowBase + x;
-                const s = grid[i];
-                if (s !== TREE && s !== BURN_TREE) continue;
-                const tv = treeVar[i];
-                const swX = treeSinTab[(tv << 5) | (i & 31)];
-                const g = treeGrowth[i] || 1;
-                // Pre-scaled bucket → unscaled integer blit (fast + crisp)
-                const b = (g * B1 + 0.5) | 0;
-                const dw = treeScaledW[b];
-                const dh = treeScaledH[b];
-                const baseX = x * cell + cell * 0.5 + jitterX[i] * 0.7 + swX;
-                const baseY = y * cell + cell * 0.92 + jitterY[i] * 0.4;
-                tlc.drawImage(treeScaled,
-                              tv * treeScaledCellW, b * treeScaledCellH, dw, dh,
-                              (baseX - dw * 0.5 + 0.5) | 0, (baseY - dh + 0.5) | 0, dw, dh);
+        const extraRows = Math.ceil(maxDh / cell) + 1;  // trees below a band whose canopy rises in
+        const blossom = (seasonParam && seasonParam.blossom) ? seasonParam.blossom : 0;
+
+        // Shared per-tree draw for a cell-row range (full rebuild + each band use it).
+        const drawRows = (rowLo, rowHi) => {
+            for (let y = rowLo; y <= rowHi; y++) {
+                const rowBase = y * cols;
+                for (let x = cx0; x <= cx1; x++) {
+                    const i = rowBase + x;
+                    const s = grid[i];
+                    if (s !== TREE && s !== BURN_TREE) continue;
+                    const tv = treeVar[i];
+                    const swX = treeSinTab[(tv << 5) | (i & 31)];
+                    const g = treeGrowth[i] || 1;
+                    const b = (g * B1 + 0.5) | 0;
+                    const dw = treeScaledW[b];
+                    const dh = treeScaledH[b];
+                    const baseX = x * cell + cell * 0.5 + jitterX[i] * 0.7 + swX;
+                    const baseY = y * cell + cell * 0.92 + jitterY[i] * 0.4;
+                    const dx = (baseX - dw * 0.5 + 0.5) | 0;
+                    const dy = (baseY - dh + 0.5) | 0;
+                    tlc.drawImage(treeScaled,
+                                  tv * treeScaledCellW, b * treeScaledCellH, dw, dh,
+                                  dx, dy, dw, dh);
+                    // Spring blossoms — pink dabs on a stable ~3/8 of trees (B2)
+                    if (blossom > 0 && (((i * 2246822519) >>> 0) & 7) < 3) {
+                        tlc.fillStyle = `rgba(248,170,205,${(0.6 * blossom).toFixed(2)})`;
+                        const n = 2 + ((i >> 3) & 1);
+                        for (let p = 0; p < n; p++) {
+                            tlc.fillRect((dx + dw * (0.24 + hash01(i, p * 2) * 0.5)) | 0,
+                                         (dy + dh * (0.08 + hash01(i, p * 2 + 1) * 0.34)) | 0, 1, 1);
+                        }
+                    }
+                }
+            }
+        };
+
+        if (treeLayerCountdown <= 0) {
+            // FULL rebuild (resize / big jump / a tree burned or sprouted)
+            tlc.clearRect(0, 0, worldPxW, worldPxH);
+            treeLayerCamX = camX; treeLayerCamY = camY;
+            drawRows(cy0, cy1);
+            treeBandPhase = 0; treeBandTick = 0;
+            treeLayerCountdown = 100000;        // banded refresh + guards maintain it from here
+        } else {
+            // AMORTIZED: refresh ONE horizontal band, spreading the rebuild cost
+            // across frames so there's no periodic spike. Faster cadence while the
+            // canopy sways or the camera moves; slow trickle when calm (for growth).
+            const moving = (Math.abs(camX - treePrevCamX) + Math.abs(camY - treePrevCamY)) > 0.5;
+            // Fast (1 band/frame) while swaying, panning, or a tree recently changed
+            // (burn/sprout) so the canopy stays current without a full-rebuild spike.
+            const bandEvery = (swaying || moving || treeContentDirty > 0) ? 1 : 6;
+            if (treeContentDirty > 0) treeContentDirty--;
+            if (++treeBandTick >= bandEvery) {
+                treeBandTick = 0;
+                // Visible tree count is ~constant across resolutions (DPI scaling),
+                // so the band count is too — splitting into ~4 keeps each band's
+                // rebuild cheap. Quality tier can spread it wider (slower sway).
+                const K = Math.max(3, Math.round(4 * qBandMul));
+                const totalRows = cy1 - cy0 + 1;
+                const bandRows = Math.ceil(totalRows / K);
+                const bcy0 = cy0 + (treeBandPhase % K) * bandRows;
+                if (bcy0 <= cy1) {
+                    const bcy1 = Math.min(cy1, bcy0 + bandRows - 1);
+                    const topPx = bcy0 * cell, botPx = (bcy1 + 1) * cell;
+                    tlc.save();
+                    tlc.beginPath();
+                    tlc.rect(rx0, topPx, rx1 - rx0, botPx - topPx);
+                    tlc.clip();
+                    tlc.clearRect(rx0, topPx, rx1 - rx0, botPx - topPx);
+                    drawRows(bcy0, Math.min(rows - 1, bcy1 + extraRows));
+                    tlc.restore();
+                }
+                treeBandPhase = (treeBandPhase + 1) % K;
             }
         }
-        // Calm wind = snapped sway is permanently 0, so the layer only changes
-        // when trees change or the camera moves: drop to a slow fallback cadence
-        // (tree changes below and the camera jump-guard force instant refreshes).
-        // At high DPI each rebuild is pricier (more visible trees) so the swaying
-        // cadence eases off too — the 1px sway reads fine at a lower refresh.
-        const activeGap = Math.round(TREE_LAYER_GAP * dpiScale);
-        treeLayerCountdown = (swayScale < 0.5) ? 30 : activeGap;
     }
     treeLayerCountdown--;
+    treePrevCamX = camX; treePrevCamY = camY;
     drawWorldLayer(treeLayerCanvas, camX, camY, w, h);
 
     // Lightning afterglow (under fire, on top of trees)
@@ -3794,7 +3930,7 @@ function render() {
         const gy1 = Math.min(worldPxH, (fbY1 + cell + gpad) | 0);
         const gw = gx1 - gx0, gh = gy1 - gy0;
         if (gw > 0 && gh > 0) {
-            if (props.fireGlow > 0) {
+            if (props.fireGlow > 0 && qGlowBlur) {
                 const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
                 const glowAmt = props.fireGlow * audioBoost;
                 // Half-resolution blur: downscale the glow region 2×, blur at
@@ -4284,19 +4420,37 @@ function loop() {
 // ============================================================
 // Input
 // ============================================================
-let mouseDown = false;
+let mouseDown = false, rightDown = false, zoomPending = 0;
 function onIgniteInput(clientX, clientY) {
     if (!props.mouseInteraction) return;
     // map the screen cursor into world coordinates (account for the camera)
     igniteAt(clientX + camX, clientY + camY, props.igniteRadius);
 }
-canvas.addEventListener("mousedown",  e => { mouseDown = true; onIgniteInput(e.clientX, e.clientY); });
-canvas.addEventListener("mouseup",    () => { mouseDown = false; });
+function onDouseInput(clientX, clientY) {
+    if (!props.mouseInteraction || !props.rightClickDouse) return;
+    douseAt(clientX + camX, clientY + camY, Math.max(3, props.igniteRadius + 2));
+}
+canvas.addEventListener("mousedown",  e => {
+    if (e.button === 2) { rightDown = true; onDouseInput(e.clientX, e.clientY); }
+    else { mouseDown = true; onIgniteInput(e.clientX, e.clientY); }
+});
+canvas.addEventListener("mouseup",    () => { mouseDown = false; rightDown = false; });
+canvas.addEventListener("contextmenu", e => { if (props.rightClickDouse) e.preventDefault(); });
 canvas.addEventListener("mousemove",  e => {
     mouseX = e.clientX; mouseY = e.clientY; mouseInside = true;
     if (mouseDown) onIgniteInput(e.clientX, e.clientY);
+    if (rightDown) onDouseInput(e.clientX, e.clientY);
 });
-canvas.addEventListener("mouseleave", () => { mouseInside = false; mouseDown = false; });
+// Scroll-wheel zoom — nudges the cell size (the "Zoom" property). Debounced so a
+// fast scroll coalesces into one world rebuild instead of one per tick.
+canvas.addEventListener("wheel", e => {
+    if (!props.scrollZoom) return;
+    e.preventDefault();
+    props.cellSize = Math.max(4, Math.min(40, props.cellSize + (e.deltaY < 0 ? 2 : -2)));
+    clearTimeout(zoomPending);
+    zoomPending = setTimeout(() => { buildSpriteAtlases(); rebuildGrid(); markTerrainDirty(); }, 150);
+}, { passive: false });
+canvas.addEventListener("mouseleave", () => { mouseInside = false; mouseDown = false; rightDown = false; });
 canvas.addEventListener("mouseenter", e => { mouseInside = true; mouseX = e.clientX; mouseY = e.clientY; });
 canvas.addEventListener("touchstart", e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
 canvas.addEventListener("touchmove",  e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
@@ -4384,6 +4538,9 @@ function applyProperty(key, raw) {
         case "showMouseHint":
         case "windGusts":
         case "seedFireOnStart":
+        case "rightClickDouse":
+        case "scrollZoom":
+        case "holdToPour":
         case "debugOverlay":
             props[key] = !!v;
             break;

@@ -543,8 +543,26 @@
                 "type":   "bool",
                 "value":  true
             },
-            "resetButton": {
+            "holdToPour": {
                 "order": 84,
+                "text":   "Hold button to keep pouring fire",
+                "type":   "bool",
+                "value":  true
+            },
+            "rightClickDouse": {
+                "order": 85,
+                "text":   "Right-click = rain burst (puts fires out)",
+                "type":   "bool",
+                "value":  true
+            },
+            "scrollZoom": {
+                "order": 86,
+                "text":   "Mouse wheel zooms (rebuilds the world)",
+                "type":   "bool",
+                "value":  true
+            },
+            "resetButton": {
+                "order": 87,
                 "text":   "Reset world now",
                 "type":   "bool",
                 "value":  false
