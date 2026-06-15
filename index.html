@@ -84,6 +84,8 @@ const props = {
     showBirds:         true,
     showFireflies:     true,
     showFish:          true,
+    showCritters:      true,   // ground animals (deer/rabbits) that flee fire
+    showInsects:       true,   // daytime butterflies / dragonflies
     showLeaves:        true,
     screenEffects:     true,   // full-screen weather tint + RGB vignette (off = calmer background)
     showRivers:        true,
@@ -289,6 +291,9 @@ let birds = [];
 let fireflies = [];
 let glowSpots = [];      // cell centres of glowing-mushroom cells (soft pulsing glow)
 let fishList  = [];      // fish shadows swimming in water bodies
+let critters  = [];      // ground animals (deer/rabbits) that wander + flee fire
+let insects   = [];      // daytime butterflies / dragonflies
+let gustWaves = [];      // travelling wind-ripple bands spawned by gusts
 let glowRefreshAt = 0;   // frame countdown to next glowSpots rescan
 let rainDrops = [];
 let clouds = [];
@@ -1553,6 +1558,135 @@ function updateFish(dt) {
 }
 
 // ============================================================
+// Ground critters — a few deer/rabbits that graze and bolt from fire (kept light:
+// a handful of entities, cheap wander + an occasional local fire scan)
+// ============================================================
+function isLandAt(px, py) {
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
+    const cx = (px / cell) | 0, cy = (py / cell) | 0;
+    if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) return false;
+    const s = grid[idx(cx, cy)];
+    return s !== WATER && s !== ROCK;
+}
+function spawnCritters() {
+    critters = [];
+    if (!props.showCritters) return;
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
+    const target = Math.min(9, Math.max(3, ((cols * rows) / 6000) | 0));
+    let tries = 0;
+    while (critters.length < target && tries < 500) {
+        tries++;
+        const i = (Math.random() * grid.length) | 0, s = grid[i];
+        if (s !== GRASS && s !== DIRT) continue;
+        const y = (i / cols) | 0, x = i - y * cols;
+        critters.push({
+            x: x * cell + cell * 0.5, y: y * cell + cell * 0.5,
+            ang: Math.random() * 6.28, speed: 0,
+            size: cell * (0.55 + Math.random() * 0.3),
+            kind: Math.random() < 0.55 ? 0 : 1,        // 0 deer, 1 rabbit
+            phase: Math.random() * 6.28,
+            fleeT: 0, pauseT: Math.random() * 80, checkT: (Math.random() * 30) | 0,
+        });
+    }
+}
+function updateCritters(dt) {
+    if (!props.showCritters || !critters.length) return;
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
+    for (const c of critters) {
+        rememberPos(c);
+        // Occasional cheap scan of nearby cells for fire → bolt directly away
+        if ((c.checkT -= dt) <= 0) {
+            c.checkT = 8 + Math.random() * 8;
+            const cx = (c.x / cell) | 0, cy = (c.y / cell) | 0, R = 7;
+            let fx = 0, fy = 0, found = 0;
+            for (let dy = -R; dy <= R; dy += 2) {
+                for (let dx = -R; dx <= R; dx += 2) {
+                    const nx = cx + dx, ny = cy + dy;
+                    if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+                    const s = grid[idx(nx, ny)];
+                    if (s === BURN_GRASS || s === BURN_TREE) { fx += dx; fy += dy; found++; }
+                }
+            }
+            if (found) { c.fleeT = 55 + Math.random() * 45; c.ang = Math.atan2(-fy, -fx); }
+        }
+        if (c.fleeT > 0) {
+            c.fleeT -= dt;
+            c.speed = c.kind === 1 ? 2.6 : 2.0;          // rabbits faster
+            c.ang  += (Math.random() - 0.5) * 0.2;
+        } else if ((c.pauseT -= dt) <= 0) {
+            if (Math.random() < 0.5) { c.speed = 0; c.pauseT = 40 + Math.random() * 90; }   // graze
+            else { c.speed = c.kind === 1 ? 0.9 : 0.6; c.ang += (Math.random() - 0.5) * 1.6; c.pauseT = 25 + Math.random() * 55; }
+        }
+        c.phase += (c.speed > 0.1 ? (c.kind === 1 ? 0.5 : 0.34) : 0.04) * dt;
+        const nx = c.x + Math.cos(c.ang) * c.speed * dt;
+        const ny = c.y + Math.sin(c.ang) * c.speed * dt;
+        if (nx > cell && nx < worldPxW - cell && ny > cell && ny < worldPxH - cell && isLandAt(nx, ny)) {
+            c.x = nx; c.y = ny;
+        } else { c.ang += 2.0 + Math.random(); }         // turn from water / edge
+    }
+}
+
+// ============================================================
+// Daytime insects — butterflies fluttering over land, dragonflies skimming water.
+// Populated to a season-scaled target (peak spring/summer, ~none in winter), like
+// the fireflies but visible and daytime.
+// ============================================================
+const BUTTERFLY_COLORS = [
+    [248, 244, 236], [250, 210, 70], [240, 130, 60], [150, 110, 220], [90, 160, 235], [235, 120, 170],
+];
+function spawnInsect() {
+    const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
+    const isDragon = Math.random() < 0.35;
+    let x = camX + Math.random() * canvas.width, y = camY + Math.random() * canvas.height;
+    for (let t = 0; t < 8; t++) {                         // try to place over the right surface
+        const tx = camX + Math.random() * canvas.width, ty = camY + Math.random() * canvas.height;
+        if (isDragon ? isWaterAt(tx, ty) : isLandAt(tx, ty)) { x = tx; y = ty; break; }
+    }
+    insects.push({
+        x, y, vx: (Math.random() - 0.5) * 0.7, vy: (Math.random() - 0.5) * 0.7,
+        kind: isDragon ? 1 : 0,
+        wing: Math.random() * 6.28, wingSpd: isDragon ? 1.4 : 0.45 + Math.random() * 0.4,
+        size: isDragon ? cell * 0.22 : cell * (0.16 + Math.random() * 0.1),
+        color: isDragon ? [70, 95, 110] : BUTTERFLY_COLORS[(Math.random() * BUTTERFLY_COLORS.length) | 0],
+        bob: Math.random() * 6.28, life: 1,
+    });
+}
+function updateInsects(dt) {
+    const seasonLife = seasonParam ? seasonParam.life : 1;
+    const target = props.showInsects ? ((22 * qMul * seasonLife) | 0) : 0;
+    if (insects.length < target && Math.random() < 0.08 * dt) spawnInsect();
+    if (!props.showInsects && insects.length) { insects.length = 0; return; }
+    if (!insects.length) return;
+    const wxF = Math.cos(windAngle), minX = camX - 30, maxX = camX + canvas.width + 30,
+          minY = camY - 30, maxY = camY + canvas.height + 30;
+    let wI = 0;
+    for (let i = 0; i < insects.length; i++) {
+        const p = insects[i];
+        rememberPos(p);
+        p.wing += p.wingSpd * dt;
+        p.bob  += 0.18 * dt;
+        if (p.kind === 0) {
+            // Butterfly — erratic flutter with vertical bob, gentle wind drift
+            p.vx += (Math.random() - 0.5) * 0.16 * dt + wxF * 0.01 * dt;
+            p.vy += (Math.random() - 0.5) * 0.16 * dt - 0.01 * dt;
+            const d = damp(0.9, dt); p.vx *= d; p.vy *= d;
+            p.x += (p.vx + Math.sin(p.bob) * 0.25) * dt;
+            p.y += (p.vy + Math.cos(p.bob * 1.3) * 0.2) * dt;
+        } else {
+            // Dragonfly — darts and hovers, keeps to the water
+            if (Math.random() < 0.04 * dt) { p.vx = (Math.random() - 0.5) * 3; p.vy = (Math.random() - 0.5) * 3; }
+            const d = damp(0.86, dt); p.vx *= d; p.vy *= d;
+            const nx = p.x + p.vx * dt, ny = p.y + p.vy * dt;
+            if (isWaterAt(nx, ny) || Math.random() < 0.3) { p.x = nx; p.y = ny; }
+            else { p.vx = -p.vx; p.vy = -p.vy; }
+        }
+        p.life -= 0.0016 * dt;
+        if (p.life > 0 && p.x > minX && p.x < maxX && p.y > minY && p.y < maxY) insects[wI++] = p;
+    }
+    insects.length = wI;
+}
+
+// ============================================================
 // Init / resize
 // ============================================================
 function rebuildGrid() {
@@ -1589,6 +1723,9 @@ function rebuildGrid() {
     sparks = [];
     birds = [];
     fireflies = [];
+    critters = [];
+    insects = [];
+    gustWaves = [];
     rainDrops = [];
     burningCount = 0;
 
@@ -1701,6 +1838,7 @@ function rebuildGrid() {
 
     refreshGlowSpots();
     spawnFish();
+    spawnCritters();
     markTerrainDirty();
 }
 
@@ -2335,13 +2473,15 @@ function updateRain(dt) {
                             burningCount--;
                             markStaticDirty();
                             if (isTree) treeContentDirty = 12;    // tree vanished → fast banded refresh (no full-rebuild spike)
-                            // Steam puff
+                            // Steam puff (light, wispy)
                             if (smokeParticles.length < MAX_SMOKE) {
                                 smokeParticles.push({
                                     x: px,
                                     y: py,
                                     vx: 0, vy: -1.0,
                                     life: 0.5, size: 5, grow: 0.3,
+                                    shade: 205 + (Math.random() * 35 | 0),
+                                    swirl: Math.random() * 6.28, swirlSpd: 0.06,
                                 });
                             }
                             break;
@@ -2562,9 +2702,11 @@ function update(dt = SIM_DT) {
             const smokeChance = (isTree ? 0.11 : 0.05) * output;
             if (Math.random() < smokeChance * dt) {
                 const sMag = 0.7 * props.windStrength;
+                // Darker at the base — fresh smoke is sooty and lightens as it rises
+                // (the render lightens it with age).
                 const shade = isTree
-                    ? (95 + Math.random() * 90) | 0
-                    : (160 + Math.random() * 70) | 0;
+                    ? (58 + Math.random() * 64) | 0
+                    : (104 + Math.random() * 64) | 0;
                 smokeParticles.push({
                     x:    x * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
                     y:    y * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
@@ -2574,6 +2716,8 @@ function update(dt = SIM_DT) {
                     size: (isTree ? 4 : 2) + Math.random() * 3,
                     grow: isTree ? 0.22 : 0.10,
                     shade,
+                    swirl: Math.random() * 6.28,            // billowing-turbulence phase
+                    swirlSpd: 0.05 + Math.random() * 0.06,
                 });
             }
         }
@@ -2769,6 +2913,11 @@ function update(dt = SIM_DT) {
             gustTimer    = 45 + (Math.random() * 60) | 0;
             windAngle   += (Math.random() - 0.5) * (0.6 + storm * 0.4);
             nextGustAt   = (500 + Math.random() * 900) | 0;
+            // A visible ripple sweeps across the view in the wind direction.
+            if (gustWaves.length < 3) {
+                gustWaves.push({ t: 0, wx: Math.cos(windAngle), wy: Math.sin(windAngle),
+                                 strength: Math.min(1.4, gustStrength), spd: 0.012 + Math.random() * 0.006 });
+            }
         }
         if (gustTimer > 0) {
             gustTimer -= dt;
@@ -2777,13 +2926,25 @@ function update(dt = SIM_DT) {
             gustStrength = 0;
         }
     }
+    // Advance travelling gust ripples (cull when they've crossed the view)
+    if (gustWaves.length) {
+        let wI = 0;
+        for (let i = 0; i < gustWaves.length; i++) {
+            const g = gustWaves[i];
+            g.t += g.spd * dt;
+            if (g.t < 1) gustWaves[wI++] = g;
+        }
+        gustWaves.length = wI;
+    }
 
     // Periodically resync glowing-mushroom spots (handles burn/regrowth changes)
     glowRefreshAt -= dt;
     if (glowRefreshAt <= 0) refreshGlowSpots();
 
-    // Fish glide in the water
+    // Fish glide in the water; critters graze/flee on land; insects flutter
     updateFish(dt);
+    updateCritters(dt);
+    updateInsects(dt);
 
     // Seasons — slow year cycle that re-colours everything + drives snow/leaves
     updateSeason(dt);
@@ -2916,13 +3077,20 @@ function update(dt = SIM_DT) {
     if (smokeParticles.length) {
         const wxA = wxF * 0.10 * props.windStrength;
         const wyA = wyF * 0.10 * props.windStrength;
+        const smokeDamp = damp(0.985, dt);
         let writeI = 0;
         for (let i = 0; i < smokeParticles.length; i++) {
             const p = smokeParticles[i];
             rememberPos(p);
+            // Swirling turbulence that grows as the puff ages → billowing column
+            if (p.swirl !== undefined) {
+                p.swirl += p.swirlSpd * dt;
+                const turb = 0.4 + (1 - p.life) * 1.6;
+                p.vx += Math.cos(p.swirl) * 0.05 * turb * dt;
+                p.vy += (Math.sin(p.swirl * 1.3) * 0.03 - 0.02) * turb * dt;  // swirl + a little extra lift
+            }
             p.x += (p.vx + wxA) * dt;
             p.y += (p.vy + wyA) * dt;
-            const smokeDamp = damp(0.985, dt);
             p.vx *= smokeDamp;
             p.vy *= smokeDamp;
             p.size += p.grow * dt;
@@ -3690,6 +3858,62 @@ function render() {
         }
     }
 
+    // Ground critters — small dark silhouettes on the ground (drawn under the
+    // trees so a deer can stand half-hidden behind a trunk). Legs walk with phase.
+    if (props.showCritters && critters.length) {
+        ctx.save();
+        ctx.fillStyle = "rgba(28,20,14,0.85)";
+        ctx.strokeStyle = "rgba(28,20,14,0.85)";
+        ctx.lineCap = "round";
+        for (const c of critters) {
+            const px = drawX(c), py = drawY(c), sz = c.size;
+            const face = Math.cos(c.ang) >= 0 ? 1 : -1;       // facing left/right
+            const moving = c.speed > 0.15;
+            const lp = moving ? Math.sin(c.phase) * sz * 0.45 : 0;
+            ctx.lineWidth = Math.max(1, sz * 0.13);
+            if (c.kind === 0) {
+                // Deer — body, 4 legs (alternating), raised neck + head + antlers
+                const bx = px, by = py - sz * 0.55;
+                ctx.beginPath();                              // legs
+                ctx.moveTo(bx - sz * 0.5, by);  ctx.lineTo(bx - sz * 0.5 + lp, py);
+                ctx.moveTo(bx + sz * 0.5, by);  ctx.lineTo(bx + sz * 0.5 - lp, py);
+                ctx.moveTo(bx - sz * 0.2, by);  ctx.lineTo(bx - sz * 0.2 - lp, py);
+                ctx.moveTo(bx + sz * 0.2, by);  ctx.lineTo(bx + sz * 0.2 + lp, py);
+                ctx.stroke();
+                ctx.beginPath();                              // body
+                ctx.ellipse(bx, by, sz * 0.62, sz * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+                const hx = bx + face * sz * 0.6, hy = by - sz * 0.5;
+                ctx.lineWidth = Math.max(1, sz * 0.16);
+                ctx.beginPath(); ctx.moveTo(bx + face * sz * 0.45, by - sz * 0.1); ctx.lineTo(hx, hy); ctx.stroke(); // neck
+                ctx.beginPath(); ctx.ellipse(hx + face * sz * 0.12, hy, sz * 0.2, sz * 0.14, 0, 0, Math.PI * 2); ctx.fill(); // head
+                ctx.lineWidth = Math.max(1, sz * 0.08);       // antlers
+                ctx.beginPath();
+                ctx.moveTo(hx, hy - sz * 0.05); ctx.lineTo(hx + face * sz * 0.05, hy - sz * 0.4);
+                ctx.moveTo(hx + face * sz * 0.05, hy - sz * 0.25); ctx.lineTo(hx + face * sz * 0.22, hy - sz * 0.3);
+                ctx.stroke();
+            } else {
+                // Rabbit — small hunched body, two ears, little hop bob
+                const hop = moving ? Math.abs(Math.sin(c.phase)) * sz * 0.3 : 0;
+                const bx = px, by = py - sz * 0.32 - hop;
+                ctx.lineWidth = Math.max(1, sz * 0.1);
+                ctx.beginPath();                              // hind legs
+                ctx.moveTo(bx - sz * 0.2, by + sz * 0.15); ctx.lineTo(bx - sz * 0.35, py);
+                ctx.moveTo(bx + sz * 0.2, by + sz * 0.15); ctx.lineTo(bx + sz * 0.35, py);
+                ctx.stroke();
+                ctx.beginPath();                              // body
+                ctx.ellipse(bx, by, sz * 0.4, sz * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+                const hx = bx + face * sz * 0.32;
+                ctx.beginPath(); ctx.ellipse(hx, by - sz * 0.12, sz * 0.2, sz * 0.18, 0, 0, Math.PI * 2); ctx.fill(); // head
+                ctx.lineWidth = Math.max(1, sz * 0.12);       // ears
+                ctx.beginPath();
+                ctx.moveTo(hx, by - sz * 0.25); ctx.lineTo(hx - face * sz * 0.04, by - sz * 0.62);
+                ctx.moveTo(hx + face * sz * 0.12, by - sz * 0.25); ctx.lineTo(hx + face * sz * 0.14, by - sz * 0.6);
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+    }
+
     // PASS 3 — side-view trees, drawn into a cached layer (rebuilt every few
     // frames) then blitted. Rows go top→bottom so nearer trees overlap the ones
     // behind (depth); each sprite's BASE anchors near the cell's lower-centre and
@@ -4115,19 +4339,64 @@ function render() {
         }
     }
 
-    // Smoke (above fire, below leaves) — per-particle shade for variety
+    // Smoke (above fire, below leaves) — sooty/dark at the base, lightening as it
+    // rises, with a billowing second lobe on the larger puffs.
     if (props.showSmoke && smokeParticles.length) {
         ctx.save();
         for (const p of smokeParticles) {
             const px = drawX(p), py = drawY(p);
-            const s = p.shade | 0;
+            let s = (p.shade | 0) + (((1 - p.life) * 70) | 0);   // lighten with age
+            if (s > 235) s = 235;
             ctx.fillStyle = rgbQ(s, (s * 0.95) | 0, (s * 0.88) | 0);
             ctx.globalAlpha = p.life * 0.14;
             ctx.beginPath();
             ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
+            if (p.size > 6 && p.swirl !== undefined) {           // billow lobe
+                ctx.globalAlpha = p.life * 0.09;
+                ctx.beginPath();
+                ctx.arc(px + Math.cos(p.swirl) * p.size * 0.55,
+                        py - Math.abs(Math.sin(p.swirl)) * p.size * 0.45,
+                        p.size * 0.66, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
         ctx.restore();
+    }
+
+    // Daytime insects — butterflies (coloured fluttering wings) + dragonflies
+    // (thin dark body, blur-fast wings) skimming over the water.
+    if (insects.length) {
+        for (const p of insects) {
+            const px = drawX(p), py = drawY(p), sz = p.size, a = Math.min(1, p.life * 2.5);
+            if (p.kind === 0) {
+                // Butterfly — two wing pairs that open/close with the flutter
+                const open = 0.35 + Math.abs(Math.sin(p.wing)) * 0.65;   // 0.35..1
+                const wx = sz * open, c = p.color;
+                ctx.globalAlpha = a * 0.9;
+                ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+                ctx.beginPath(); ctx.ellipse(px - wx * 0.6, py, wx * 0.7, sz * 0.85, 0.5, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(px + wx * 0.6, py, wx * 0.7, sz * 0.85, -0.5, 0, Math.PI * 2); ctx.fill();
+                ctx.globalAlpha = a;                                     // body
+                ctx.fillStyle = "rgba(30,24,18,0.9)";
+                ctx.fillRect((px - sz * 0.08) | 0, (py - sz * 0.5) | 0, Math.max(1, sz * 0.16), sz);
+            } else {
+                // Dragonfly — long thin body + 4 faint blurred wings
+                const dir = Math.atan2(p.vy, p.vx) || 0, c = p.color;
+                ctx.save(); ctx.translate(px, py); ctx.rotate(dir);
+                ctx.globalAlpha = a * 0.4;                               // wings
+                ctx.fillStyle = "rgba(225,235,245,0.7)";
+                const ww = sz * 1.3, wo = Math.sin(p.wing) * sz * 0.1;
+                ctx.beginPath(); ctx.ellipse(sz * 0.1, -wo, ww, sz * 0.32, 0.5, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(sz * 0.1,  wo, ww, sz * 0.32, -0.5, 0, Math.PI * 2); ctx.fill();
+                ctx.globalAlpha = a;                                     // body
+                ctx.strokeStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+                ctx.lineWidth = Math.max(1, sz * 0.3); ctx.lineCap = "round";
+                ctx.beginPath(); ctx.moveTo(-sz * 1.4, 0); ctx.lineTo(sz * 0.7, 0); ctx.stroke();
+                ctx.restore();
+            }
+        }
+        ctx.globalAlpha = 1;
     }
 
     // Fireflies (between embers/smoke and birds — drift glow)
@@ -4215,6 +4484,34 @@ function render() {
 
     // Back to screen space for the full-screen overlays + cursor UI.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    // Wind-gust ripple — a soft light/shadow band sweeps across the view in the
+    // wind direction when a gust passes, reading on grass, trees and water alike.
+    if (gustWaves.length) {
+        const cxg = w * 0.5, cyg = h * 0.5;
+        const diag = Math.hypot(w, h);
+        for (const g of gustWaves) {
+            const fade = Math.sin(g.t * Math.PI);          // ease in/out across the sweep
+            if (fade <= 0.02) continue;
+            const travel = (g.t - 0.5) * (diag + 240);
+            const bx = cxg + g.wx * travel, by = cyg + g.wy * travel;
+            const a = 0.06 * fade * g.strength;
+            const bandW = 130;
+            ctx.save();
+            ctx.translate(bx, by);
+            ctx.rotate(Math.atan2(g.wy, g.wx));
+            const grd = ctx.createLinearGradient(-bandW, 0, bandW, 0);
+            grd.addColorStop(0,    "rgba(255,255,255,0)");
+            grd.addColorStop(0.42, `rgba(255,255,255,${a.toFixed(3)})`);   // leading highlight
+            grd.addColorStop(0.52, `rgba(30,40,22,${(a * 0.9).toFixed(3)})`); // trailing shadow
+            grd.addColorStop(0.62, `rgba(255,255,255,${(a * 0.5).toFixed(3)})`);
+            grd.addColorStop(1,    "rgba(255,255,255,0)");
+            ctx.globalCompositeOperation = "soft-light";
+            ctx.fillStyle = grd;
+            ctx.fillRect(-bandW, -diag, bandW * 2, diag * 2);
+            ctx.restore();
+        }
+    }
 
     // --- Seasonal colour grade over the whole scene ---
     // Winter desaturates + cools, autumn warms to gold, spring freshens, summer
@@ -4558,6 +4855,14 @@ function applyProperty(key, raw) {
         case "showFish":
             props.showFish = !!v;
             spawnFish();   // (re)populate or clear the fish
+            break;
+        case "showCritters":
+            props.showCritters = !!v;
+            spawnCritters();
+            break;
+        case "showInsects":
+            props.showInsects = !!v;
+            if (!v) insects.length = 0;
             break;
         case "showRivers":
         case "showLilyPads":

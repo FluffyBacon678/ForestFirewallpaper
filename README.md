@@ -99,7 +99,8 @@ Features:
 - Lightning bolts with screen flash, **persistent afterglow column**, RGB edge pulse
 - Smoldering ash with heat-red glow
 - **Ember comet trails** — embers leave a bright streak as they fly
-- **Smoke with per-particle color variety** (light from grass, dark from trees)
+- **Billowing smoke** — sooty and dark at the base, lightening and swirling with
+  turbulence as it rises into clumpy, billowing plumes
 - **Animated water sparkles** with travelling wave-band brightness
 - **Six weather types** on a dry→wet spectrum: **Drought** (sunny/hot, warm tint,
   fire spreads fast) → Clear → Cloudy → Rain → **Monsoon** (heavy rain) →
@@ -118,10 +119,19 @@ Features:
   with a Wallpaper Engine slider for clean curtain rain vs broken rain cells
 - Rain extinguishes fires (with steam puffs); storms boost lightning frequency
 - Cloud shadows drift across ground (off by default — toggle in properties)
-- Bird flocks in V-formation that **steer around active fires**
-- Fireflies with pulsing glow
+- Bird flocks in V-formation that **steer around active fires**, each bird a
+  gull-wing silhouette that **beats its wings** (droop → glide → upstroke)
+- **Ground critters** — a few deer and rabbits graze and wander the clearings on
+  walking/hopping legs and **bolt away when a fire gets near** (kept light: a
+  handful of entities with a cheap local fire-scan, no pathfinding)
+- **Daytime insects** — butterflies flutter over the meadows and dragonflies skim
+  the water, peaking in spring/summer and gone by deep winter (the daytime
+  counterpart to the night fireflies)
+- Fireflies with pulsing glow (night/ambient)
 - **Fish shadows** gliding under the water — dark fish with wagging tails that wander
   the ponds and rivers and turn back at the shore
+- **Wind-gust ripple** — when a gust passes, a soft light/shadow wave rolls across
+  the whole view in the wind direction, reading on grass, trees and water alike
 - **"Screen effects" toggle** — the full-screen weather tint, lightning flash and RGB
   edge glow are gentler by default and can be switched off entirely for a calm,
   easy-on-the-eyes desktop background
@@ -271,7 +281,7 @@ Organized into sections in the Wallpaper Engine picker:
 | Seasons | Season (auto/spring/summer/autumn/winter), Season length (auto-cycle), Winter snow intensity |
 | Weather | Mode (auto/drought/clear/cloudy/rain/monsoon/storm), Front direction (LTR/RTL/TTB/BTT/static), Transition speed, Cloud shadows, Rain intensity, Rain scatter, Rain extinguishes |
 | Auto-ignition & regrowth | Auto-ignite, Auto-ignite rate, Regrowth, Regrowth rate |
-| Atmosphere | Birds, Fireflies, Fish shadows, Screen effects toggle, Wind gusts, Starter fire on load |
+| Atmosphere | Birds, Fireflies, Fish shadows, Ground critters (deer/rabbits), Butterflies & dragonflies, Screen effects toggle, Wind gusts, Starter fire on load |
 | Audio reactivity | React to system audio, Audio strength |
 | RGB lighting | RGB edge mode, RGB edge strength |
 | Interaction | Mouse interaction, Click ignition radius, Show ignition radius hint, Hold to pour fire, Right-click rain burst, Mouse-wheel zoom, Reset world |

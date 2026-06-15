@@ -408,6 +408,18 @@
                 "type":   "bool",
                 "value":  true
             },
+            "showCritters": {
+                "order": 65,
+                "text":   "Ground critters (deer / rabbits that flee fire)",
+                "type":   "bool",
+                "value":  true
+            },
+            "showInsects": {
+                "order": 66,
+                "text":   "Butterflies & dragonflies (daytime)",
+                "type":   "bool",
+                "value":  true
+            },
             "screenEffects": {
                 "order": 64,
                 "text":   "Full-screen effects (weather tint, lightning flash, RGB glow) — off = calmer background",
