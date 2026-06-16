@@ -296,6 +296,7 @@ let insects   = [];      // daytime butterflies / dragonflies
 let gustWaves = [];      // travelling wind-ripple bands spawned by gusts
 let glowRefreshAt = 0;   // frame countdown to next glowSpots rescan
 let rainDrops = [];
+let rainSplash = [];     // little splash droplets bouncing up where the douse-rain lands
 let clouds = [];
 let rockVar; // Uint8Array per cell, only meaningful when grid[i] === ROCK
 let weatherCurrent = WEATHER_CLEAR;
@@ -1743,6 +1744,7 @@ function rebuildGrid() {
     insects = [];
     gustWaves = [];
     rainDrops = [];
+    rainSplash = [];
     burningCount = 0;
 
     buildRockSprites();
@@ -1941,26 +1943,38 @@ function douseAt(px, py, radius) {
             burningCount--;
             markStaticDirty();
             if (isTree) treeContentDirty = 12;
-            if (smokeParticles.length < MAX_SMOKE) {
+            // A little hiss of steam where a flame is doused
+            if (smokeParticles.length < MAX_SMOKE && Math.random() < 0.7) {
                 smokeParticles.push({
                     x: nx * cell + cell * 0.5, y: ny * cell + cell * 0.5,
-                    vx: (Math.random() - 0.5) * 0.6, vy: -1.0 - Math.random() * 0.6,
-                    life: 0.6, size: 5 + Math.random() * 3, grow: 0.3,
-                    shade: 210 + (Math.random() * 40 | 0),
+                    vx: (Math.random() - 0.5) * 0.6, vy: -1.0 - Math.random() * 0.7,
+                    life: 0.55, size: 4 + Math.random() * 4, grow: 0.32,
+                    shade: 212 + (Math.random() * 40 | 0),
                 });
             }
         }
     }
-    // Visible rain burst over the spot
-    const wxF = Math.cos(windAngle);
-    const dropN = 12 + r * r, rainCap = (MAX_RAIN * qMul) | 0;
-    for (let k = 0; k < dropN && rainDrops.length < rainCap; k++) {
+    // A focused little shower pouring DOWN onto the spot from above the cursor,
+    // plus splash specks where it lands. Rate is modest so it can be called every
+    // tick while the button is held (a sustained downpour) without flooding.
+    const wxF = Math.cos(windAngle), spread = r * cell;
+    const rainCap = (MAX_RAIN * qMul) | 0;
+    const drops = 3 + r;
+    for (let k = 0; k < drops && rainDrops.length < rainCap; k++) {
         rainDrops.push({
-            x: px + (Math.random() - 0.5) * r * cell * 2,
-            y: py + (Math.random() - 0.5) * r * cell * 2 - 30 - Math.random() * 60,
-            vx: wxF * 1.5 * props.windStrength + (Math.random() - 0.5),
-            vy: 8 + Math.random() * 4,
-            len: 6 + Math.random() * 6,
+            x: px + (Math.random() - 0.5) * spread * 1.2,
+            y: py - 45 - Math.random() * (spread * 2 + 70),     // start above, fall onto the spot
+            vx: wxF * 2.0 * props.windStrength + (Math.random() - 0.5) * 0.8,
+            vy: 7 + Math.random() * 5,
+            len: 7 + Math.random() * 7,
+        });
+    }
+    // Splash droplets bouncing up off the ground at the cursor
+    for (let k = 0; k < 2 && rainSplash.length < 200; k++) {
+        rainSplash.push({
+            x: px + (Math.random() - 0.5) * spread,
+            y: py + (Math.random() - 0.5) * cell * 0.6,
+            vx: (Math.random() - 0.5) * 2.6, vy: -(1.0 + Math.random() * 1.7), life: 1,
         });
     }
 }
@@ -2525,6 +2539,20 @@ function updateRain(dt) {
         }
         rainDrops.length = writeI;
     }
+    // Splash droplets — small arcs that pop up and fall back (gravity), fading out
+    if (rainSplash.length) {
+        let writeI = 0;
+        for (let i = 0; i < rainSplash.length; i++) {
+            const p = rainSplash[i];
+            rememberPos(p);
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.vy += 0.26 * dt;            // gravity
+            p.life -= 0.06 * dt;
+            if (p.life > 0) rainSplash[writeI++] = p;
+        }
+        rainSplash.length = writeI;
+    }
 }
 
 // ============================================================
@@ -2618,6 +2646,10 @@ function update(dt = SIM_DT) {
     // on move), so holding still pours a growing fire.
     if (mouseDown && props.holdToPour && props.mouseInteraction && mouseInside) {
         igniteAt(mouseX + camX, mouseY + camY, props.igniteRadius);
+    }
+    // Hold right-button → a sustained rain shower on the spot (douses fire).
+    if (rightDown && props.rightClickDouse && props.mouseInteraction && mouseInside) {
+        douseAt(mouseX + camX, mouseY + camY, Math.max(3, props.igniteRadius + 2));
     }
     // Wind — base + gust burst, audio bass also nudges strength briefly
     windAngle += 0.003 * props.windRotation * dt;
@@ -2975,11 +3007,6 @@ function update(dt = SIM_DT) {
             gustTimer    = 45 + (Math.random() * 60) | 0;
             windAngle   += (Math.random() - 0.5) * (0.6 + storm * 0.4);
             nextGustAt   = (500 + Math.random() * 900) | 0;
-            // A visible ripple sweeps across the view in the wind direction.
-            if (gustWaves.length < 3) {
-                gustWaves.push({ t: 0, wx: Math.cos(windAngle), wy: Math.sin(windAngle),
-                                 strength: Math.min(1.4, gustStrength), spd: 0.012 + Math.random() * 0.006 });
-            }
         }
         if (gustTimer > 0) {
             gustTimer -= dt;
@@ -2987,16 +3014,6 @@ function update(dt = SIM_DT) {
         } else {
             gustStrength = 0;
         }
-    }
-    // Advance travelling gust ripples (cull when they've crossed the view)
-    if (gustWaves.length) {
-        let wI = 0;
-        for (let i = 0; i < gustWaves.length; i++) {
-            const g = gustWaves[i];
-            g.t += g.spd * dt;
-            if (g.t < 1) gustWaves[wI++] = g;
-        }
-        gustWaves.length = wI;
     }
 
     // Periodically resync glowing-mushroom spots (handles burn/regrowth changes)
@@ -4027,7 +4044,9 @@ function render() {
         const rx1 = Math.min(worldPxW, (camX + w + MX) | 0);
         const ry1 = Math.min(worldPxH, (camY + h + MY) | 0);
 
-        const swayScale = Math.min(1.4, props.windStrength) * cell * 0.10;
+        // A passing gust briefly swells the sway → the canopy visibly stirs as the
+        // gust rolls through (replaces the old screen-band overlay).
+        const swayScale = Math.min(1.7, props.windStrength + gustStrength * 0.7) * cell * 0.10;
         const swayWxF = Math.cos(windAngle);
         const swayT = renderTimeSec * 1.9;          // slower, calmer base rhythm
         const swaying = swayScale >= 0.5;
@@ -4584,6 +4603,16 @@ function render() {
             ctx.stroke();
         }
     }
+    // Splash droplets where the douse-rain lands
+    if (rainSplash.length) {
+        ctx.fillStyle = "rgb(205,228,246)";
+        for (const p of rainSplash) {
+            const px = drawX(p), py = drawY(p);
+            ctx.globalAlpha = Math.min(1, p.life) * 0.7;
+            ctx.fillRect(px | 0, py | 0, 1, 2);
+        }
+        ctx.globalAlpha = 1;
+    }
 
     // Lightning bolts (very top, with flash) — still in world space
     drawLightning();
@@ -4591,33 +4620,6 @@ function render() {
     // Back to screen space for the full-screen overlays + cursor UI.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-    // Wind-gust ripple — a soft light/shadow band sweeps across the view in the
-    // wind direction when a gust passes, reading on grass, trees and water alike.
-    if (gustWaves.length) {
-        const cxg = w * 0.5, cyg = h * 0.5;
-        const diag = Math.hypot(w, h);
-        for (const g of gustWaves) {
-            const fade = Math.sin(g.t * Math.PI);          // ease in/out across the sweep
-            if (fade <= 0.02) continue;
-            const travel = (g.t - 0.5) * (diag + 240);
-            const bx = cxg + g.wx * travel, by = cyg + g.wy * travel;
-            const a = 0.06 * fade * g.strength;
-            const bandW = 130;
-            ctx.save();
-            ctx.translate(bx, by);
-            ctx.rotate(Math.atan2(g.wy, g.wx));
-            const grd = ctx.createLinearGradient(-bandW, 0, bandW, 0);
-            grd.addColorStop(0,    "rgba(255,255,255,0)");
-            grd.addColorStop(0.42, `rgba(255,255,255,${a.toFixed(3)})`);   // leading highlight
-            grd.addColorStop(0.52, `rgba(30,40,22,${(a * 0.9).toFixed(3)})`); // trailing shadow
-            grd.addColorStop(0.62, `rgba(255,255,255,${(a * 0.5).toFixed(3)})`);
-            grd.addColorStop(1,    "rgba(255,255,255,0)");
-            ctx.globalCompositeOperation = "soft-light";
-            ctx.fillStyle = grd;
-            ctx.fillRect(-bandW, -diag, bandW * 2, diag * 2);
-            ctx.restore();
-        }
-    }
 
     // --- Seasonal colour grade over the whole scene ---
     // Winter desaturates + cools, autumn warms to gold, spring freshens, summer
@@ -4853,7 +4855,8 @@ canvas.addEventListener("contextmenu", e => { if (props.rightClickDouse) e.preve
 canvas.addEventListener("mousemove",  e => {
     mouseX = e.clientX; mouseY = e.clientY; mouseInside = true;
     if (mouseDown) onIgniteInput(e.clientX, e.clientY);
-    if (rightDown) onDouseInput(e.clientX, e.clientY);
+    // right-hold rain is driven per sim-tick in update() (uses mouseX/Y), so the
+    // shower follows the cursor whether it's moving or held still
 });
 // Scroll-wheel zoom — nudges the cell size (the "Zoom" property). Debounced so a
 // fast scroll coalesces into one world rebuild instead of one per tick.

@@ -138,8 +138,9 @@ Features:
 - Fireflies with pulsing glow (night/ambient)
 - **Fish shadows** gliding under the water — dark fish with wagging tails that wander
   the ponds and rivers and turn back at the shore
-- **Wind-gust ripple** — when a gust passes, a soft light/shadow wave rolls across
-  the whole view in the wind direction, reading on grass, trees and water alike
+- **Gusts stir the canopy** — when a wind gust passes, the trees briefly sway
+  noticeably harder (a swell that rolls through and fades), so you feel the wind
+  move through the forest
 - **"Screen effects" toggle** — the full-screen weather tint, lightning flash and RGB
   edge glow are gentler by default and can be switched off entirely for a calm,
   easy-on-the-eyes desktop background
