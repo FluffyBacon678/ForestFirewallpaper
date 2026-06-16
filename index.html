@@ -4205,7 +4205,12 @@ function render() {
                 // White-hot reserved mostly for dense clusters; a lone flame stays orange/yellow
                 const hot = Math.min(1, intensity * 0.30 + heat * 0.95);
 
-                const flicker = 0.84 + Math.random() * 0.32;   // gentler per-frame jitter (less shimmer)
+                // SMOOTH per-cell flicker + sway (each flame at its own phase) instead
+                // of per-frame random — the flame breathes and dances gracefully rather
+                // than boiling/strobing every frame. No high-frequency noise.
+                const fph = (((i * 2654435761) >>> 0) / 4294967296) * 6.2831853;
+                const flicker = 0.85 + 0.10 * Math.sin(renderTimeSec * 9.0 + fph)
+                                     + 0.05 * Math.sin(renderTimeSec * 16.0 + fph * 2.3);
                 // Flame radius grows with intensity; a clustered blaze flares larger
                 const baseR = (isTree ? cell * 0.80 : cell * 0.46);
                 // Lower size floor so a young smoldering cell is a tiny flame,
@@ -4213,8 +4218,9 @@ function render() {
                 const flameR = baseR * (0.12 + intensity * 1.02) * (1 + heat * 0.5) * flicker;
                 const jx = isTree ? jitterX[i] : 0;
                 const jy = isTree ? jitterY[i] : 0;
-                const cxP = x * cell + cell * 0.5 + jx + (Math.random() - 0.5) * cell * 0.20;
-                const cyP = y * cell + cell * 0.5 + jy + (Math.random() - 0.5) * cell * 0.20;
+                const swayP = Math.sin(renderTimeSec * 4.5 + fph * 1.7) * cell * 0.14;
+                const cxP = x * cell + cell * 0.5 + jx + swayP;
+                const cyP = y * cell + cell * 0.5 + jy;
 
                 // Magic-fire cells get a matching coloured underglow
                 let mGlow = 0;
