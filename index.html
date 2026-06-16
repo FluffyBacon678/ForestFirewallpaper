@@ -351,6 +351,22 @@ let treeBandPhase = 0, treeBandTick = 0;        // amortized rebuild: which band
 let treeContentDirty = 0;                       // frames of fast banded refresh after a tree changed
 let treePrevCamX = 0, treePrevCamY = 0;         // camera last frame (motion detection)
 const treeSinTab = new Float32Array(320);       // per-rebuild sway offsets (treeVar × i&31)
+// Per-combo sway VARIATION so trees don't all sway in lock-step: each (treeVar,
+// i&31) combo gets its own frequency, amplitude (skewed low → many trees barely
+// move) and phase. Built once. Indexed the same as treeSinTab.
+const treeSwayFreq  = new Float32Array(320);
+const treeSwayAmp   = new Float32Array(320);
+const treeSwayPhase = new Float32Array(320);
+let treeSwayBuilt = false;
+function buildTreeSwayTables() {
+    for (let k = 0; k < 320; k++) {
+        treeSwayFreq[k]  = 0.55 + hash01(k, 11) * 0.75;        // 0.55 .. 1.30 × base speed
+        const ha = hash01(k, 12);
+        treeSwayAmp[k]   = 0.10 + ha * ha * 0.95;              // skewed low: most barely sway
+        treeSwayPhase[k] = hash01(k, 13) * 6.2831853;
+    }
+    treeSwayBuilt = true;
+}
 // Sway is a ~1px, ~2s oscillation drawn at integer positions — sampling it every
 // 2nd frame (30Hz at 60fps, 60Hz at 120fps) is visually identical to every frame
 // and halves the biggest recurring render cost.
@@ -3816,14 +3832,13 @@ function render() {
             ctx.beginPath();
             ctx.arc(ax, ay, cell * 0.62, 0, Math.PI * 2);
             ctx.fill();
-            // Bright coal core — flickers on top of the bed
-            if (Math.random() < 0.5) {
-                ctx.fillStyle = rgbQ(255, g + 45, b + 12);
-                ctx.globalAlpha = heat * 0.5 * fl;
-                ctx.beginPath();
-                ctx.arc(ax, ay, Math.max(1, cell * (0.12 + hsh * 0.08)), 0, Math.PI * 2);
-                ctx.fill();
-            }
+            // Bright coal core — drawn every frame with a SMOOTH per-coal pulse (no
+            // per-frame random on/off, which strobed) so it glimmers gently.
+            ctx.fillStyle = rgbQ(255, g + 45, b + 12);
+            ctx.globalAlpha = heat * 0.42 * fl;
+            ctx.beginPath();
+            ctx.arc(ax, ay, Math.max(1, cell * (0.12 + hsh * 0.08)), 0, Math.PI * 2);
+            ctx.fill();
             // Glowing cracks — thin hot fissures across the freshest coals
             if (hsh < 0.4 && heat > 0.28) {
                 ctx.strokeStyle = rgbQ(255, (g * 0.7) | 0, b);
@@ -3837,12 +3852,13 @@ function render() {
                 ctx.lineTo(ax + Math.cos(a2) * cr * 0.7, ay + Math.sin(a2) * cr * 0.7);
                 ctx.stroke();
             }
-            // Coal pop — a coal randomly flares bright for a moment
-            if (Math.random() < 0.013 * heat) {
-                ctx.fillStyle = "rgb(255,226,162)";
-                ctx.globalAlpha = 0.55 * heat;
+            // Coal pop — a coal occasionally flares (rare + soft so it reads as the
+            // odd ember catching, not a strobe)
+            if (Math.random() < 0.004 * heat) {
+                ctx.fillStyle = "rgb(255,224,160)";
+                ctx.globalAlpha = 0.32 * heat;
                 ctx.beginPath();
-                ctx.arc(ax, ay, cell * (0.18 + Math.random() * 0.12), 0, Math.PI * 2);
+                ctx.arc(ax, ay, cell * (0.16 + Math.random() * 0.1), 0, Math.PI * 2);
                 ctx.fill();
             }
         }
@@ -4013,11 +4029,13 @@ function render() {
 
         const swayScale = Math.min(1.4, props.windStrength) * cell * 0.10;
         const swayWxF = Math.cos(windAngle);
-        const swayT = renderTimeSec * 3.0;
+        const swayT = renderTimeSec * 1.9;          // slower, calmer base rhythm
         const swaying = swayScale >= 0.5;
-        // Sway changes every frame, so the banded refresh needs a current table.
+        if (!treeSwayBuilt) buildTreeSwayTables();
+        // Each combo sways at its OWN frequency / amplitude / phase → a messy,
+        // natural canopy where some trees barely stir and others sway more.
         for (let k = 0; k < 320; k++) {
-            treeSinTab[k] = swayWxF * Math.sin(swayT + (k >> 5) * 0.4 + (k & 31) * 0.21) * swayScale;
+            treeSinTab[k] = swayWxF * Math.sin(swayT * treeSwayFreq[k] + treeSwayPhase[k]) * swayScale * treeSwayAmp[k];
         }
         const cx0 = Math.max(0, ((rx0 - maxDw / 2 - cell) / cell) | 0);
         const cx1 = Math.min(cols - 1, Math.ceil((rx1 + maxDw / 2 + cell) / cell));
@@ -4139,7 +4157,7 @@ function render() {
                 // White-hot reserved mostly for dense clusters; a lone flame stays orange/yellow
                 const hot = Math.min(1, intensity * 0.30 + heat * 0.95);
 
-                const flicker = 0.75 + Math.random() * 0.5;
+                const flicker = 0.84 + Math.random() * 0.32;   // gentler per-frame jitter (less shimmer)
                 // Flame radius grows with intensity; a clustered blaze flares larger
                 const baseR = (isTree ? cell * 0.80 : cell * 0.46);
                 // Lower size floor so a young smoldering cell is a tiny flame,
@@ -4342,7 +4360,9 @@ function render() {
         for (const p of sparks) {
             const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
-            const tw = 0.55 + 0.45 * Math.sin(renderTimeSec * 54 + px);   // fast twinkle
+            // Gentle twinkle — ~1.3 Hz (well under the flicker/epilepsy threshold),
+            // shallow depth, per-spark phase via px so they're not in lock-step.
+            const tw = 0.7 + 0.3 * Math.sin(renderTimeSec * 8 + px);
             ctx.fillStyle = rgbQ(255, (220 + a * 35) | 0, (140 * a) | 0);
             ctx.globalAlpha = a * tw;
             ctx.beginPath();
@@ -4361,7 +4381,7 @@ function render() {
         for (const p of embers) {
             const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
-            const tw = 0.7 + 0.3 * Math.sin((p.phase || 0) + renderTimeSec * 10.8); // soft pulse
+            const tw = 0.75 + 0.25 * Math.sin((p.phase || 0) + renderTimeSec * 6.5); // soft slow pulse
             // soft glow halo
             ctx.fillStyle = rgbQ(255, (130 + a * 70) | 0, (40 * a) | 0);
             ctx.globalAlpha = a * 0.16 * tw;
