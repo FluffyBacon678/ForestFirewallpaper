@@ -2664,8 +2664,9 @@ function update(dt = SIM_DT) {
         // and only while it's hot. This stops the instant-leap fast spread.
         const spreadGate = Math.max(0, (intensity - 0.50)) / 0.50; // 0 until intensity>0.50 → 1
 
-        // --- Count burning neighbours (the clustering "blaze" heat) + spread ---
-        let burningNeighbors = 0;
+        // --- Count burning neighbours (clustering "blaze" heat) + fresh-fuel
+        //     neighbours (the advancing front) + spread ---
+        let burningNeighbors = 0, fuelNeighbors = 0;
         for (let d = 0; d < NEIGHBOURS.length; d++) {
             const dx = NEIGHBOURS[d][0];
             const dy = NEIGHBOURS[d][1];
@@ -2675,6 +2676,7 @@ function update(dt = SIM_DT) {
             const ni = idx(nx, ny);
             const ns = grid[ni];
             if (ns === BURN_TREE || ns === BURN_GRASS) { burningNeighbors++; continue; }
+            if (ns === GRASS || ns === TREE) fuelNeighbors++;
             if (spreadGate <= 0) continue;
             let spread;
             if (ns === GRASS)      spread = sg;
@@ -2718,6 +2720,37 @@ function update(dt = SIM_DT) {
                     shade,
                     swirl: Math.random() * 6.28,            // billowing-turbulence phase
                     swirlSpd: 0.05 + Math.random() * 0.06,
+                });
+            }
+        }
+
+        // Smolder wisp — a thin, slow grey curl even when barely flaming, so a cell
+        // that's just catching or burning out visibly smoulders.
+        const smolderAmt = Math.max(0, 1 - intensity * 1.4);
+        if (props.showSmoke && smolderAmt > 0.12 && smokeParticles.length < (MAX_SMOKE * qMul) | 0
+            && Math.random() < (isTree ? 0.05 : 0.035) * smolderAmt * dt) {
+            smokeParticles.push({
+                x: x * cell + cell * 0.5 + (Math.random() - 0.5) * cell * 0.5,
+                y: y * cell + cell * 0.4 + (Math.random() - 0.5) * cell * 0.3,
+                vx: wxF * 0.3 * props.windStrength + (Math.random() - 0.5) * 0.2,
+                vy: -0.4 - Math.random() * 0.4,             // slow rise
+                life: 0.45, size: 1.3 + Math.random() * 1.2, grow: 0.05,
+                shade: 110 + (Math.random() * 45 | 0),      // thin grey
+                swirl: Math.random() * 6.28, swirlSpd: 0.05 + Math.random() * 0.05,
+            });
+        }
+
+        // Creeping front — the advancing edge throws extra sparks as it eats fresh
+        // fuel, so a spreading fire's leading line crackles with life.
+        if (fuelNeighbors > 0 && props.showEmbers && intensity > 0.04 && intensity < 0.7
+            && sparks.length < (MAX_SPARKS * qMul) | 0 && Math.random() < 0.10 * dt) {
+            const n = 1 + (Math.random() * 2 | 0);
+            for (let sN = 0; sN < n; sN++) {
+                sparks.push({
+                    x: x * cell + cell * 0.5 + jitterX[i], y: y * cell + cell * 0.5 + jitterY[i],
+                    vx: wxF * 0.8 * props.windStrength + (Math.random() - 0.5) * 2.0,
+                    vy: wyF * 0.8 * props.windStrength - (0.6 + Math.random() * 1.4),
+                    life: 0.4 + Math.random() * 0.4, size: 0.5 + Math.random() * 0.6,
                 });
             }
         }
@@ -2831,6 +2864,19 @@ function update(dt = SIM_DT) {
                     size: 0.7 + Math.random() * 0.5,
                     phase: Math.random() * 6.28,
                 });
+            }
+            // Crackle — a hot coal occasionally snaps off a couple of bright sparks
+            if (props.showEmbers && burnTimer[i] > 200 && sparks.length < (MAX_SPARKS * qMul) | 0
+                && Math.random() < 0.012 * sdt) {
+                const cy2 = (i / cols) | 0, cx2 = i - cy2 * cols;
+                const n = 1 + (Math.random() * 2 | 0);
+                for (let sN = 0; sN < n; sN++) {
+                    sparks.push({
+                        x: cx2 * cell + cell * 0.5 + jitterX[i], y: cy2 * cell + cell * 0.5 + jitterY[i],
+                        vx: (Math.random() - 0.5) * 1.6, vy: -(0.5 + Math.random() * 1.3),
+                        life: 0.3 + Math.random() * 0.35, size: 0.5 + Math.random() * 0.5,
+                    });
+                }
             }
         } else if (s === CHARRED) {
             // Fresh black char cools into a grey, ash-dusted bed.
@@ -3778,6 +3824,27 @@ function render() {
                 ctx.arc(ax, ay, Math.max(1, cell * (0.12 + hsh * 0.08)), 0, Math.PI * 2);
                 ctx.fill();
             }
+            // Glowing cracks — thin hot fissures across the freshest coals
+            if (hsh < 0.4 && heat > 0.28) {
+                ctx.strokeStyle = rgbQ(255, (g * 0.7) | 0, b);
+                ctx.globalAlpha = heat * 0.34 * fl;
+                ctx.lineWidth = 1;
+                const a1 = hsh * 6.28, a2 = a1 + 2.1, cr = cell * 0.34;
+                ctx.beginPath();
+                ctx.moveTo(ax - Math.cos(a1) * cr, ay - Math.sin(a1) * cr);
+                ctx.lineTo(ax + Math.cos(a1) * cr, ay + Math.sin(a1) * cr);
+                ctx.moveTo(ax - Math.cos(a2) * cr * 0.7, ay - Math.sin(a2) * cr * 0.7);
+                ctx.lineTo(ax + Math.cos(a2) * cr * 0.7, ay + Math.sin(a2) * cr * 0.7);
+                ctx.stroke();
+            }
+            // Coal pop — a coal randomly flares bright for a moment
+            if (Math.random() < 0.013 * heat) {
+                ctx.fillStyle = "rgb(255,226,162)";
+                ctx.globalAlpha = 0.55 * heat;
+                ctx.beginPath();
+                ctx.arc(ax, ay, cell * (0.18 + Math.random() * 0.12), 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
     }
     ctx.globalAlpha = 1;
@@ -4106,36 +4173,55 @@ function render() {
                     glowCtx.fill();
                 } else {
                     // Per-cell warm-hue variety so a field of low flames reads as a
-                    // living ember bed (deep-red ↔ ember-orange ↔ amber) instead of
-                    // uniform red polka-dots. Stable per cell + a slow flicker.
+                    // living ember bed (deep-red ↔ ember-orange ↔ amber).
                     const hsh = ((i * 2654435761) >>> 0) / 4294967296;
                     const vhue = (hsh + 0.5 + Math.sin(renderTimeSec * 2.2 + hsh * 33) * 0.18) % 1;
-                    let oG = (40 + vhue * 95 + intensity * 95 + heat * 55) | 0;  // red→orange→amber→yellow
+                    let oG = (40 + vhue * 95 + intensity * 95 + heat * 55) | 0;
                     let oB = (6  + vhue * 22 + hot * 80) | 0;
+                    // Asymmetric lifecycle: a BUILDING fire stays warm orange/yellow;
+                    // a DYING one (age>0.70) COOLS toward deep blood-red.
+                    let dying = 0;
+                    if (age > 0.70) { dying = (age - 0.70) / 0.30; oG -= dying * 72; oB -= dying * 46; }
+                    if (oG < 12) oG = 12; if (oB < 2) oB = 2;
                     if (oG > 255) oG = 255; if (oB > 255) oB = 255;
 
-                    // Wide soft ember-bed — spans ~a cell so neighbouring low fires
-                    // MERGE into one creeping front (the blur pass fuses them). The
-                    // larger low-intensity floor is what kills the isolated-dot look.
+                    // Breathing — low/dying fire pulses slowly instead of a steady disc;
+                    // fades out as the blaze builds.
+                    const lowAmt = Math.max(0, 1 - intensity * 1.5);
+                    const breathe = 1 - lowAmt * 0.42 * (0.5 - 0.5 * Math.sin(renderTimeSec * 1.9 + hsh * 28));
+
+                    // Creeping front — a low-intensity cell touching fresh fuel glows
+                    // brighter (the bright leading line of a spreading fire).
+                    let front = false;
+                    if (lowAmt > 0.2) {
+                        front = (x > 0        && (grid[i - 1]    === GRASS || grid[i - 1]    === TREE)) ||
+                                (x < cols - 1 && (grid[i + 1]    === GRASS || grid[i + 1]    === TREE)) ||
+                                (y > 0        && (grid[i - cols] === GRASS || grid[i - cols] === TREE)) ||
+                                (y < rows - 1 && (grid[i + cols] === GRASS || grid[i + cols] === TREE));
+                    }
+                    const frontBoost = front ? (1 + lowAmt * 0.6) : 1;
+
+                    // Wide soft ember-bed — neighbouring low fires merge into a front.
                     const bedR = (isTree ? cell * 0.95 : cell * 0.74) * (0.62 + intensity * 0.7) * (1 + heat * 0.4);
                     glowCtx.fillStyle = rgbQ(230 + (vhue * 25) | 0, (oG * 0.62) | 0, (oB * 0.5) | 0);
-                    glowCtx.globalAlpha = 0.20 + intensity * 0.22;
+                    glowCtx.globalAlpha = Math.min(1, (0.20 + intensity * 0.22) * breathe * frontBoost);
                     glowCtx.beginPath();
                     glowCtx.arc(cxP, cyP, bedR, 0, Math.PI * 2);
                     glowCtx.fill();
 
                     // Mid flame — the warm hue, at the flame radius
                     glowCtx.fillStyle = rgbQ(255, oG, oB);
-                    glowCtx.globalAlpha = 0.5 + intensity * 0.3;
+                    glowCtx.globalAlpha = Math.min(1, (0.5 + intensity * 0.3) * breathe);
                     glowCtx.beginPath();
                     glowCtx.arc(cxP, cyP, flameR, 0, Math.PI * 2);
                     glowCtx.fill();
 
-                    // Bright core — warm amber, lifting to white-hot in a blaze
-                    const iG = (150 + hot * 70) | 0;
-                    const iB = (45 + hot * 90) | 0;
+                    // Bright core — warm amber/white-hot; cools with the dying tail.
+                    let iG = (150 + hot * 70 - dying * 64) | 0;
+                    let iB = (45 + hot * 90 - dying * 40) | 0;
+                    if (iG < 30) iG = 30; if (iB < 5) iB = 5;
                     glowCtx.fillStyle = rgbQ(255, iG, iB);
-                    glowCtx.globalAlpha = 0.40 + intensity * 0.35;
+                    glowCtx.globalAlpha = Math.min(1, (0.40 + intensity * 0.35) * breathe * frontBoost);
                     glowCtx.beginPath();
                     glowCtx.arc(cxP, cyP, flameR * 0.5, 0, Math.PI * 2);
                     glowCtx.fill();

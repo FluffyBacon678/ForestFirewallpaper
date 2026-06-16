@@ -71,10 +71,18 @@ Features:
   out, adding the snap and life of a real fire
 - **Glowing ember motes** — drifting embers carry a soft warm halo and a gentle pulse,
   floating like living sparks of light
-- **Living low/dying fire** — smoldering and burnt-out cells aren't uniform red dots:
-  each gets a warm-hue spread (ember-red → orange → amber), a wide soft underglow so
-  neighbours fuse into one continuous creeping ember bed, and the odd small flame lick,
-  so a low or dying burn reads as glowing coals rather than polka-dots
+- **Living low/dying fire** — the smoldering, catching and burning-out phases each
+  have their own character instead of being a dim copy of the blaze:
+  - **smolder wisps + breathing** — a catching or dying cell curls thin grey smoke
+    and pulses a dull red even with barely a flame
+  - **cooling vs. growing colour** — a *building* fire brightens warm orange/yellow
+    while a *dying* one cools to deep blood-red, so you can read growth from death
+  - **glowing cracks + coal pops** — the burnt-out coal bed is laced with hot
+    fissures and occasionally flares, snapping off crackling sparks and embers
+  - **lively creeping front** — the advancing edge eating into fresh fuel glows
+    brighter and throws extra sparks, like a real grass fire's leading line
+  - a warm-hue spread + wide soft underglow still fuse neighbours into one
+    continuous ember bed (no uniform red polka-dots)
 - **Heat-shimmer distortion** — a subtle ripple above a blaze (off by default; it's
   a big effect, so it stays out of the way unless you turn it on)
 - **Magic fire** (optional slider) — turn it up for coherent patches of cyan, green,
