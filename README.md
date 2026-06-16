@@ -90,6 +90,11 @@ Features:
 - Competing glows (fireflies, glowing mushrooms) are kept subtle so the fire is the star
 - Spread is tuned for the lush forest so fires **creep and stay contained** rather
   than engulfing the screen (slower base spread + rarer ember spot-fires)
+- **Self-balancing forest** — both new ignitions *and* spread slow down as more of
+  the map is ablaze, so a big fire runs out of steam and burns out instead of
+  feeding on regrowth forever. Left running on auto for hours the forest settles
+  into a healthy equilibrium (~75–85% green with the odd contained fire) instead
+  of slowly charring down — exactly what you want from a 24/7 wallpaper
 - **Multi-stage burn-scar lifecycle** — after the flames pass, the ground heals
   through a visible weathering sequence rather than snapping back to green:
   smouldering ash → **fresh black char** (charcoal chunks, ember still glowing in

@@ -293,7 +293,6 @@ let glowSpots = [];      // cell centres of glowing-mushroom cells (soft pulsing
 let fishList  = [];      // fish shadows swimming in water bodies
 let critters  = [];      // ground animals (deer/rabbits) that wander + flee fire
 let insects   = [];      // daytime butterflies / dragonflies
-let gustWaves = [];      // travelling wind-ripple bands spawned by gusts
 let glowRefreshAt = 0;   // frame countdown to next glowSpots rescan
 let rainDrops = [];
 let rainSplash = [];     // little splash droplets bouncing up where the douse-rain lands
@@ -1742,7 +1741,6 @@ function rebuildGrid() {
     fireflies = [];
     critters = [];
     insects = [];
-    gustWaves = [];
     rainDrops = [];
     rainSplash = [];
     burningCount = 0;
@@ -2662,7 +2660,12 @@ function update(dt = SIM_DT) {
 
     // Fire spread responds to weather (drought fans, wet damps) AND season — a
     // snow-covered winter forest barely catches; high summer is a tinderbox.
-    const fireMul = weatherFireMul() * (seasonParam ? seasonParam.fireMul : 1);
+    // It ALSO self-limits: as more of the forest is ablaze, spread slows sharply,
+    // so a big fire runs out of steam and burns out (instead of consuming the
+    // whole map by feeding on regrowth) → a healthy long-term equilibrium.
+    const burnFrac = burningCount / Math.max(1, grid.length);
+    const spreadDamp = 1 / (1 + (burnFrac * 130) * (burnFrac * 130));
+    const fireMul = weatherFireMul() * (seasonParam ? seasonParam.fireMul : 1) * spreadDamp;
     const sg = BASE_SPREAD_GRASS * props.spreadRate * fireMul;
     const st = BASE_SPREAD_TREE  * props.spreadRate * fireMul;
 
@@ -2670,6 +2673,13 @@ function update(dt = SIM_DT) {
     // Rate is per-weather: storm peaks, monsoon moderate, drought low but nonzero.
     if (props.autoIgnite) {
         let chance = (1 / (10 * 60)) * props.autoIgniteRate;
+        // Self-limiting: the more of the forest is already ablaze, the rarer new
+        // strikes become. This is a negative feedback that holds the forest at a
+        // healthy dynamic equilibrium (occasional fires over a mostly-green map)
+        // for hours, instead of auto-ignite slowly charring everything.
+        const burnFrac = burningCount / Math.max(1, grid.length);
+        const sup = burnFrac * 320;
+        chance /= (1 + sup * sup);
         const wetStormRamp = Math.max(0, Math.min(1, weatherIntensitySmooth));
         const targetLightning = WEATHER_LIGHTNING[weatherTarget] || 1;
         const currentLightning = WEATHER_LIGHTNING[weatherCurrent] || 1;
