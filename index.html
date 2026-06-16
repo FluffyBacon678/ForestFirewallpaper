@@ -133,12 +133,12 @@ const SPROUT     = 12; // pioneer regrowth — first moss/weeds break through th
 //   0x40 (bit 6):   water — lily pad present
 //   0x80 (bit 7):   dirt  — path tint flag
 
-const BURN_BASE         = 110;  // longer-lived flames → the fire "process" lingers
+const BURN_BASE         = 150;  // longer-lived flames → a slow, watchable burn (firepit feel)
 // Spread is gated by fire intensity (a cell must build up before it can spread).
 // Lowered for the lusher forest: with more fuel per cell the same rate would race,
 // so these are tuned so the front creeps gently and fires don't engulf the screen.
-const BASE_SPREAD_GRASS = 0.0090;
-const BASE_SPREAD_TREE  = 0.0046;
+const BASE_SPREAD_GRASS = 0.0072;
+const BASE_SPREAD_TREE  = 0.0037;
 
 // Fire lifecycle intensity curve from normalized age (0 = just lit, 1 = spent).
 // Smolder → grow → blaze (plateau) → die back to embers. Returns 0..1.
@@ -1937,7 +1937,7 @@ function douseAt(px, py, radius) {
             if (s !== BURN_GRASS && s !== BURN_TREE) continue;
             const isTree = s === BURN_TREE;
             grid[i] = isTree ? ASH_TREE : ASH_GRASS;
-            burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;
+            burnTimer[i] = (isTree ? 660 : 480) + Math.random() * 460;
             burningCount--;
             markStaticDirty();
             if (isTree) treeContentDirty = 12;
@@ -2497,7 +2497,7 @@ function updateRain(dt) {
                             if (weatherFrontAmount(px, py) < Math.random() * 0.85) continue;
                             const isTree = grid[i] === BURN_TREE;
                             grid[i] = isTree ? ASH_TREE : ASH_GRASS;
-                            burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;
+                            burnTimer[i] = (isTree ? 660 : 480) + Math.random() * 460;
                             burningCount--;
                             markStaticDirty();
                             if (isTree) treeContentDirty = 12;    // tree vanished → fast banded refresh (no full-rebuild spike)
@@ -2660,12 +2660,9 @@ function update(dt = SIM_DT) {
 
     // Fire spread responds to weather (drought fans, wet damps) AND season — a
     // snow-covered winter forest barely catches; high summer is a tinderbox.
-    // It ALSO self-limits: as more of the forest is ablaze, spread slows sharply,
-    // so a big fire runs out of steam and burns out (instead of consuming the
-    // whole map by feeding on regrowth) → a healthy long-term equilibrium.
-    const burnFrac = burningCount / Math.max(1, grid.length);
-    const spreadDamp = 1 / (1 + (burnFrac * 130) * (burnFrac * 130));
-    const fireMul = weatherFireMul() * (seasonParam ? seasonParam.fireMul : 1) * spreadDamp;
+    // (No global cap — the high spread gate + slower base rate make fires build
+    // gradually and burn out organically.)
+    const fireMul = weatherFireMul() * (seasonParam ? seasonParam.fireMul : 1);
     const sg = BASE_SPREAD_GRASS * props.spreadRate * fireMul;
     const st = BASE_SPREAD_TREE  * props.spreadRate * fireMul;
 
@@ -2704,7 +2701,7 @@ function update(dt = SIM_DT) {
 
         if (burnTimer[i] <= 0) {
             grid[i] = isTree ? ASH_TREE : ASH_GRASS;
-            burnTimer[i] = (isTree ? 420 : 280) + Math.random() * 300;  // short smoulder phase
+            burnTimer[i] = (isTree ? 660 : 480) + Math.random() * 460;  // short smoulder phase
             fireHeat[i] = 0;
             burningCount--;
             markStaticDirty(); // grass tuft → ash patch baked
@@ -2718,9 +2715,11 @@ function update(dt = SIM_DT) {
         // --- Lifecycle: smolder → grow → blaze → die ---
         const age = burnMax[i] > 0 ? (1 - burnTimer[i] / burnMax[i]) : 0;
         const intensity = burnIntensity(age);
-        // Spread gate: a cell can only spread once it's an established flame,
-        // and only while it's hot. This stops the instant-leap fast spread.
-        const spreadGate = Math.max(0, (intensity - 0.50)) / 0.50; // 0 until intensity>0.50 → 1
+        // Spread gate: a cell only catches its neighbours once it's a fully
+        // established, roaring flame (intensity > 0.72) — a fire has to BUILD before
+        // it spreads. This makes fires creep gradually and naturally peter out
+        // (no global cap needed) and reads as a slow, watchable burn.
+        const spreadGate = Math.max(0, (intensity - 0.72)) / 0.28; // 0 until intensity>0.72 → 1
 
         // --- Count burning neighbours (clustering "blaze" heat) + fresh-fuel
         //     neighbours (the advancing front) + spread ---
@@ -2813,6 +2812,26 @@ function update(dt = SIM_DT) {
             }
         }
 
+        // Settle / log-shift — a hot clustered spot occasionally "collapses" with a
+        // shower of sparks and a few lifting embers, like a log settling in a fire.
+        if (props.showEmbers && heat > 0.5 && Math.random() < 0.0006 * dt) {
+            const ns = 4 + (Math.random() * 5 | 0);
+            for (let sN = 0; sN < ns && sparks.length < (MAX_SPARKS * qMul); sN++) {
+                sparks.push({
+                    x: x * cell + cell * 0.5 + jitterX[i], y: y * cell + cell * 0.5 + jitterY[i],
+                    vx: (Math.random() - 0.5) * 3.6, vy: -(1.6 + Math.random() * 2.8),  // burst upward
+                    life: 0.5 + Math.random() * 0.6, size: 0.6 + Math.random() * 0.8,
+                });
+            }
+            for (let e = 0; e < 3 && embers.length < (MAX_EMBERS * qMul); e++) {
+                embers.push({
+                    x: x * cell + cell * 0.5, y: y * cell + cell * 0.5,
+                    vx: (Math.random() - 0.5) * 1.4, vy: -(1.0 + Math.random() * 1.6),
+                    life: 0.9 + Math.random() * 0.5, size: 1.1 + Math.random() * 1.2, phase: Math.random() * 6.28,
+                });
+            }
+        }
+
         // Embers — more thrown from a roaring, clustered blaze
         if (props.showEmbers && embers.length < (MAX_EMBERS * qMul) | 0) {
             const emberChance = (isTree ? 0.10 : 0.025) * output;
@@ -2890,8 +2909,8 @@ function update(dt = SIM_DT) {
     // edges and burn scars near woodland re-fuel naturally.
     // STRIDED: each tick visits 1/4 of the grid with dt×4 — statistically the
     // same rates/timers at a quarter of the per-tick scan cost.
-    const regrowGrass    = props.regrowth ? 0.00016 * props.regrowthRate : 0;
-    const regrowTreeBase = props.regrowth ? 0.00016 * props.regrowthRate : 0;
+    const regrowGrass    = props.regrowth ? 0.00024 * props.regrowthRate : 0;
+    const regrowTreeBase = props.regrowth ? 0.00018 * props.regrowthRate : 0;
     // Scar weathering speed follows the regrowth-rate slider so cranking recovery
     // heals the black/grey/bare stages faster too (floor keeps it from freezing).
     const healStep = (dt * 4) * Math.max(0.5, props.regrowthRate);
@@ -2904,7 +2923,7 @@ function update(dt = SIM_DT) {
             // hot smouldering ash → cold charred earth (a lingering burn scar)
             if (burnTimer[i] <= 0) {
                 grid[i] = CHARRED;
-                burnTimer[i] = 700 + Math.random() * 900;   // fresh char, first of several scar stages
+                burnTimer[i] = 450 + Math.random() * 600;   // fresh char, first of several scar stages
                 markStaticDirty();
                 continue;
             }
@@ -2941,7 +2960,7 @@ function update(dt = SIM_DT) {
             burnTimer[i] -= healStep;
             if (burnTimer[i] <= 0) {
                 grid[i] = CHAR_COOL;
-                burnTimer[i] = 900 + Math.random() * 1300;
+                burnTimer[i] = 550 + Math.random() * 800;
                 markStaticDirty();
             }
         } else if (s === CHAR_COOL) {
@@ -2949,7 +2968,7 @@ function update(dt = SIM_DT) {
             burnTimer[i] -= healStep;
             if (burnTimer[i] <= 0) {
                 grid[i] = SCORCH;
-                burnTimer[i] = 1000 + Math.random() * 1500;
+                burnTimer[i] = 650 + Math.random() * 950;
                 terrainRestoreDirt(i);   // clear pre-fire baked grass; scorch covers it opaquely
                 markStaticDirty();
             }
@@ -3843,7 +3862,7 @@ function render() {
             const i = rowBase + x;
             const s = grid[i];
             if (s !== ASH_TREE && s !== ASH_GRASS) continue;
-            const heat = Math.min(1, burnTimer[i] / 350);   // hottest right after burning
+            const heat = Math.min(1, burnTimer[i] / 620);   // glow fades slowly over the long coal life
             if (heat <= 0.05) continue;
             const hsh = ((i * 2654435761) >>> 0) / 4294967296;
             const fl = 0.6 + 0.4 * Math.sin(renderTimeSec * 3.4 + hsh * 40); // per-coal flicker

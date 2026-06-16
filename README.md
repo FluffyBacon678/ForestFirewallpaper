@@ -55,9 +55,11 @@ Features:
   pebbles, fallen leaves and twigs**). Lush green growth dominates; the showy ones
   are accents.
 - Two flammable layers (grass + trees), separate burn rates
-- **Fire lifecycle** — every cell goes smolder → grow → blaze → die back to embers
-  (cubic ease-in): a new flame starts as a tiny ~15%-size faint ember, stays small
-  for ~1 second, then builds into the full blaze over the next second
+- **Fire lifecycle / firepit feel** — every cell goes smolder → grow → blaze → die
+  back to a long, glowing **bed of coals** that breathes, cracks, pops and slowly
+  cools (cubic ease-in for the build). Flames are long-lived and the coal stage
+  lingers, so a fire is something to *watch* — like staring into a campfire — and
+  hot clusters occasionally **settle** with a shower of sparks (a log shifting)
 - **Intensity-gated spread** — a cell can't ignite neighbours until its flame is
   established, so the fire front creeps organically instead of leaping
 - **Blaze / conflagration heat** — cells with many burning neighbours flare larger
@@ -88,13 +90,15 @@ Features:
 - **Magic fire** (optional slider) — turn it up for coherent patches of cyan, green,
   purple, blue and pink flame, each with a matching coloured glow; 0 = normal fire
 - Competing glows (fireflies, glowing mushrooms) are kept subtle so the fire is the star
-- Spread is tuned for the lush forest so fires **creep and stay contained** rather
-  than engulfing the screen (slower base spread + rarer ember spot-fires)
-- **Self-balancing forest** — both new ignitions *and* spread slow down as more of
-  the map is ablaze, so a big fire runs out of steam and burns out instead of
-  feeding on regrowth forever. Left running on auto for hours the forest settles
-  into a healthy equilibrium (~75–85% green with the odd contained fire) instead
-  of slowly charring down — exactly what you want from a 24/7 wallpaper
+- **A fire has to build before it spreads** — a cell only catches its neighbours
+  once it's a fully established, roaring flame (high intensity gate) and spreads
+  at a slow base rate, so fires **build gradually, creep, and naturally peter out**
+  rather than racing across the screen. No artificial "forest-wide" cap — it's the
+  fire's own physics.
+- **Self-balancing forest** — because fires build slowly *and* burnt ground recovers
+  on a faster timeline than the fire spreads, the forest holds a healthy equilibrium
+  left on auto for hours (a mostly-green map with the odd slow, contained fire and
+  its glowing coal-bed) instead of charring down — what you want from a 24/7 wallpaper
 - **Multi-stage burn-scar lifecycle** — after the flames pass, the ground heals
   through a visible weathering sequence rather than snapping back to green:
   smouldering ash → **fresh black char** (charcoal chunks, ember still glowing in
