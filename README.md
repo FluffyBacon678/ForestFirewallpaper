@@ -20,9 +20,11 @@ Features:
   swells in spring/summer and thins toward winter.
 - **Interactive** — left-click (or hold to pour) starts a wildfire at the cursor;
   **right-click drops a rain burst** that puts fires out with steam; **scroll the
-  mouse wheel to zoom the view in (up to 3×, toward the cursor)** — a pure camera
-  zoom that *keeps the world and any live fire*, no regeneration. All three are
-  individually toggleable.
+  mouse wheel to zoom**. Zoom is a smooth camera zoom toward the cursor that
+  *keeps the world and any live fire* (no regeneration) for several steps each
+  way; only at the extremes does it regenerate one detail step — bigger/chunkier
+  zooming in, smaller/lusher zooming out — with the apparent scale preserved so
+  the zoom keeps flowing instead of snapping. All three are individually toggleable.
 - Procedural noise terrain (biomes, clearings, dense pockets)
 - Rivers, ponds, shoreline tree reflections — smooth blurred-mask shorelines
   (deep water → shallow rim, no blocky/circle edges). Optional lily pads with
@@ -110,6 +112,15 @@ Features:
   ages black → grey → brown → green over a couple of minutes, and the heal speed
   follows the **Regrowth rate** slider (turn regrowth off and scars linger as a
   barren scorched wasteland — also a natural firebreak).
+- **Trees burn down, not out** — a burning tree's canopy is consumed by the fire:
+  through the back half of its burn it **shrinks and chars to a dark skeleton**, so
+  it visibly collapses to a charred stump before dropping to ash, rather than
+  vanishing whole. Most visible at the dying edge of a fire where the flames have
+  dropped low.
+- **Firelight on the water** — a blaze near the river casts a warm, dancing shimmer
+  onto the surface (flattened, surface-reflection ellipses, each at its own phase so
+  it ripples rather than strobes), tying the fire and water — the two showpieces —
+  together. Scales with the fire's intensity and fades a couple of cells from shore.
 - **Wildflowers bloom after a fire** — burned ground regrows flower-rich, with
   fireweed, poppies and dense meadows taking over the nutrient-rich ash before the
   forest slowly reclaims it (just like a real post-fire bloom).
