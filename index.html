@@ -187,6 +187,8 @@ const SPECIES_AUTUMN = 3;
 const SPECIES_DEAD   = 4;
 const SPECIES_CHERRY = 5;   // flowering cherry — rare pink-blossom accent tree
 const SPECIES_FIR    = 6;   // soft rounded fir — conifer sibling with scalloped foliage
+const SPECIES_POPLAR = 7;   // tall narrow columnar broadleaf
+const SPECIES_WILLOW = 8;   // weeping broadleaf with drooping fronds
 
 // Weather modes — ordered as a spectrum from driest to wettest so the
 // auto-cycle can drift one step at a time (sunny → clear → cloudy → … → storm).
@@ -243,7 +245,7 @@ const NEIGHBOURS = [
     [-1, 1],[ 0, 1],[ 1, 1],
 ];
 
-const TREE_NUM_VARIANTS  = 14;  // 7 species × 2 sizes
+const TREE_NUM_VARIANTS  = 18;  // 9 species × 2 sizes
 const TREE_SWAY_SLOTS    = TREE_NUM_VARIANTS * 32;  // sway tables: (treeVar << 5) | (i & 31)
 // Ground-cover variety, baked one slice per variant:
 //   0-9   lush grass (shade/density variations)
@@ -254,13 +256,15 @@ const TREE_SWAY_SLOTS    = TREE_NUM_VARIANTS * 32;  // sway tables: (treeVar << 
 //   28 flower patch  29 lavender  30 tulips  31 pampas grass  32 reeds  33 glowing mushrooms
 //   34-36 jungle broadleaf / fern / elephant-ear
 //   37 daisies  38 poppies  39 fireweed  40 buttercups  41 pebbles  42 leaf litter  43 wildflower meadow
-const GRASS_NUM_VARIANTS = 46;
+const GRASS_NUM_VARIANTS = 48;
 const GRASS_GLOWMUSH = 33;   // variant index whose cells emit a soft pulsing glow
 // Flower / clutter variants used to bias post-fire regrowth into a bloom meadow
 const GRASS_DAISY = 37, GRASS_POPPY = 38, GRASS_FIREWEED = 39,
       GRASS_BUTTERCUP = 40, GRASS_PEBBLES = 41, GRASS_LITTER = 42, GRASS_MEADOW = 43;
 const GRASS_CORNFLOWER = 44; // NEW — true-blue cornflowers (the one missing flower colour)
 const GRASS_BENT = 45;       // NEW — wispy seed-headed bent-grass (airy tall-grass texture)
+const GRASS_LUPINE = 46;     // NEW — tall purple/blue flower SPIKES (vertical shape)
+const GRASS_BELL = 47;       // NEW — drooping violet bell-flowers (hanging shape)
 const TREE_TINTS = [
     { r: 32, g: 78,  b: 24 },  // darker green
     { r: 50, g: 105, b: 32 },  // brighter green
@@ -718,13 +722,15 @@ function buildScaledTreeAtlas() {
 // bottom (baseY) and the canopy rises toward the top.
 // ============================================================
 function renderTreeTopDown(c, ox, oy, w, h, variant) {
-    const species = (variant >> 1) & 7;
+    const species = (variant >> 1) & 15;
     const sizeIdx = variant & 1;
     const cx = ox + w / 2;
     const baseY = oy + h - 1;
     switch (species) {
         case SPECIES_PINE:   drawConiferSide(c, cx, baseY, w, h, sizeIdx); break;
         case SPECIES_FIR:    drawFirSide(c, cx, baseY, w, h, sizeIdx); break;
+        case SPECIES_POPLAR: drawPoplarSide(c, cx, baseY, w, h, sizeIdx); break;
+        case SPECIES_WILLOW: drawWillowSide(c, cx, baseY, w, h, sizeIdx); break;
         case SPECIES_BIRCH:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "birch"); break;
         case SPECIES_MAPLE:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "maple"); break;
         case SPECIES_AUTUMN: drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "autumn"); break;
@@ -905,6 +911,60 @@ function drawFirSide(c, cx, baseY, w, h, sizeIdx) {
     c.fillRect((cx - 0.5) | 0, topY | 0, 1, 2);
 }
 
+// Poplar: tall, NARROW columnar broadleaf — stacked vertical leaf clusters that
+// taper to a point, a flame/column silhouette quite unlike the round oak.
+function drawPoplarSide(c, cx, baseY, w, h, sizeIdx) {
+    const trunkH = h * 0.16, trunkW = Math.max(2, w * 0.09);
+    drawGroundShadow(c, cx, baseY, w * 0.18);
+    drawTrunkSide(c, cx, baseY, trunkW, trunkH, false);
+    const dark = "#27501b", mid = "#3b7c2b", lite = "#5aa540", hi = "#84c462";
+    const cw = w * 0.26;                              // narrow column
+    const topY = baseY - h * 0.99;
+    const botY = baseY - trunkH * 0.55;
+    const colH = botY - topY;
+    const segs = 4 + sizeIdx;
+    for (let s = 0; s < segs; s++) {
+        const f = s / (segs - 1);                    // 0 top → 1 bottom
+        const cy = topY + colH * (0.10 + f * 0.82);
+        const rx = cw * (0.34 + f * 0.78);           // narrow up top, wider low
+        const ry = colH * 0.19;
+        leafCluster(c, cx, cy, rx, ry, dark, 16, 1.0);
+        leafCluster(c, cx, cy - ry * 0.12, rx * 0.82, ry * 0.85, mid, 14, 0.92);
+        leafCluster(c, cx - rx * 0.3, cy - ry * 0.25, rx * 0.5, ry * 0.46, lite, 8, 0.88);
+    }
+    leafCluster(c, cx - cw * 0.18, topY + colH * 0.22, cw * 0.4, colH * 0.16, hi, 6, 0.8);
+}
+
+// Willow: rounded crown + long DROOPING fronds that drape from its underside
+// (longest in the middle) — a soft weeping silhouette, lovely near the water.
+function drawWillowSide(c, cx, baseY, w, h, sizeIdx) {
+    const trunkH = h * 0.24, trunkW = Math.max(2, w * 0.12);
+    drawGroundShadow(c, cx, baseY, w * 0.34);
+    drawTrunkSide(c, cx, baseY, trunkW, trunkH, false);
+    const dark = "#3a5e22", mid = "#5d8a36", lite = "#88b85a", hi = "#b0d27f";
+    const canRx = w * (0.42 + sizeIdx * 0.03);
+    const canRy = h * 0.20;
+    const canCy = baseY - trunkH - canRy * 0.6;
+    leafCluster(c, cx, canCy, canRx, canRy, dark, 26, 1.0);
+    leafCluster(c, cx, canCy - canRy * 0.1, canRx * 0.9, canRy * 0.85, mid, 24, 0.92);
+    leafCluster(c, cx - canRx * 0.25, canCy - canRy * 0.22, canRx * 0.55, canRy * 0.5, lite, 14, 0.88);
+    leafCluster(c, cx - canRx * 0.3, canCy - canRy * 0.28, canRx * 0.32, canRy * 0.3, hi, 6, 0.82);
+    c.lineWidth = Math.max(1, w * 0.024); c.lineCap = "round";   // fine tendrils
+    const fronds = 12 + sizeIdx * 3;                              // many → soft cascade
+    const sy = canCy + canRy * 0.45;
+    for (let i = 0; i <= fronds; i++) {
+        const fx = cx - canRx * 0.92 + (canRx * 1.84) * (i / fronds);
+        const mid01 = 1 - Math.abs(fx - cx) / (canRx * 0.92);    // 1 centre → 0 edge (longest mid)
+        const droop = canRy * 0.5 + (0.4 + 0.6 * mid01) * h * 0.40 + Math.random() * h * 0.05;
+        const sway = (Math.random() - 0.5) * w * 0.12;           // gentle per-frond wander
+        c.strokeStyle = (i % 3 === 0) ? lite : mid;
+        c.beginPath();
+        c.moveTo(fx, sy);
+        c.quadraticCurveTo(fx + sway, sy + droop * 0.5, fx + sway * 0.6, sy + droop);
+        c.stroke();
+    }
+}
+
 // Dead tree: bare branching skeleton (pale grey or reddish-brown).
 function drawDeadSide(c, cx, baseY, w, h, sizeIdx) {
     const reddish = sizeIdx === 1;
@@ -994,12 +1054,14 @@ function renderRockSprite(c, ox, oy, w, h, variant) {
 function pickTreeVariant() {
     const r = Math.random();
     let species;
-    if      (r < 0.28) species = SPECIES_PINE;
-    else if (r < 0.46) species = SPECIES_FIR;      // ~18% — soft rounded conifer sibling
-    else if (r < 0.62) species = SPECIES_BIRCH;
-    else if (r < 0.75) species = SPECIES_MAPLE;
-    else if (r < 0.87) species = SPECIES_AUTUMN;
-    else if (r < 0.93) species = SPECIES_CHERRY;   // ~6% — occasional flowering accent
+    if      (r < 0.24) species = SPECIES_PINE;
+    else if (r < 0.40) species = SPECIES_FIR;      // ~16% — soft rounded conifer sibling
+    else if (r < 0.48) species = SPECIES_POPLAR;   // ~8%  — tall columnar broadleaf
+    else if (r < 0.55) species = SPECIES_WILLOW;   // ~7%  — weeping broadleaf
+    else if (r < 0.68) species = SPECIES_BIRCH;
+    else if (r < 0.79) species = SPECIES_MAPLE;
+    else if (r < 0.89) species = SPECIES_AUTUMN;
+    else if (r < 0.94) species = SPECIES_CHERRY;   // ~5% — occasional flowering accent
     else               species = SPECIES_DEAD;
     const sz = (Math.random() < 0.5) ? 0 : 1;
     return (species << 1) | sz;
@@ -1049,6 +1111,8 @@ function renderGrassTopDown(c, ox, oy, w, h, variant) {
     else if (variant === 42) drawLeafLitter(c, ox, oy, w, h);
     else if (variant === GRASS_CORNFLOWER) drawCornflowers(c, ox, oy, w, h);
     else if (variant === GRASS_BENT)       drawBentGrass(c, ox, oy, w, h);
+    else if (variant === GRASS_LUPINE)     drawLupines(c, ox, oy, w, h);
+    else if (variant === GRASS_BELL)       drawBellflowers(c, ox, oy, w, h);
     else                     drawWildflowerMeadow(c, ox, oy, w, h);   // 43 + fallback
 }
 
@@ -1553,6 +1617,56 @@ function drawBentGrass(c, ox, oy, w, h) {
     }
 }
 
+// --- Lupines: tall tapering flower SPIKES (purple/blue) — a vertical-spike shape ---
+function drawLupines(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const pal = [[126,86,196],[150,112,214],[96,132,206]];   // purples / blue
+    const n = 3 + (Math.random() * 3 | 0);
+    for (let i = 0; i < n; i++) {
+        const bx = ox + 2 + Math.random() * (w - 4);
+        const by = oy + h - 1;
+        const sh = Math.max(4, h * (0.45 + Math.random() * 0.35));
+        c.fillStyle = "rgba(74,112,52,0.85)";                // stem
+        c.fillRect(bx | 0, (by - sh) | 0, 1, sh);
+        const col = pal[(Math.random() * pal.length) | 0];
+        for (let s = 0; s < sh; s += 2) {                    // spike of florets, tapering up
+            const t = s / sh;
+            const ww = Math.max(0.6, (1 - t) * w * 0.10);
+            c.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},${(0.7 + 0.3 * (1 - t)).toFixed(2)})`;
+            c.fillRect((bx - ww) | 0, (by - s) | 0, Math.max(1, (ww * 2) | 0), 1);
+        }
+        c.fillStyle = "rgba(230,220,250,0.8)";               // pale tip
+        c.fillRect(bx | 0, (by - sh) | 0, 1, 1);
+    }
+}
+
+// --- Bellflowers: violet bells DROOPING from an upright stem — a hanging shape ---
+function drawBellflowers(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 2);
+    const n = 3 + (Math.random() * 3 | 0);
+    for (let i = 0; i < n; i++) {
+        const bx = ox + 2 + Math.random() * (w - 4);
+        const topy = oy + 1 + Math.random() * (h * 0.35);
+        const sh = Math.max(4, h * (0.35 + Math.random() * 0.3));
+        c.fillStyle = "rgba(72,110,54,0.85)";                // upright stem
+        c.fillRect(bx | 0, topy | 0, 1, sh);
+        const bells = 2 + (Math.random() * 2 | 0);
+        const bw = Math.max(1.4, w * 0.11);
+        for (let bI = 0; bI < bells; bI++) {
+            const byp = topy + sh * (0.45 + bI * 0.26);
+            const bxp = bx + (bI & 1 ? 1 : -1) * w * 0.06;   // alternate sides
+            c.fillStyle = "rgba(138,102,206,0.95)";          // violet bell, hanging down
+            c.beginPath();
+            c.moveTo(bxp - bw * 0.5, byp);
+            c.lineTo(bxp + bw * 0.5, byp);
+            c.lineTo(bxp, byp + bw * 1.25);
+            c.closePath(); c.fill();
+            c.fillStyle = "rgba(186,156,230,0.9)";           // lit rim
+            c.fillRect((bxp - bw * 0.4) | 0, byp | 0, 1, 1);
+        }
+    }
+}
+
 // --- Pebbles: small grey/tan stones (ground clutter, not a plant) ---
 function drawPebbles(c, ox, oy, w, h) {
     drawLushGrass(c, ox, oy, w, h, 3);
@@ -1622,6 +1736,8 @@ function pickGrassVariant() {
     if (r < 0.62) return 13 + (Math.random() * 3 | 0);    // 13-15 dry grass (rarer in a jungle)
     if (r < 0.70) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
     if (r < 0.725) return GRASS_CORNFLOWER;               // 44 true-blue cornflowers
+    if (r < 0.745) return GRASS_LUPINE;                   // 46 tall purple flower spikes
+    if (r < 0.765) return GRASS_BELL;                     // 47 drooping violet bells
     // --- richer flower / clutter band ---
     if (r < 0.735) return GRASS_DAISY;        // 37 daisies
     if (r < 0.765) return GRASS_BUTTERCUP;    // 40 buttercups
