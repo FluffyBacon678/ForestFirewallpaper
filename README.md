@@ -37,10 +37,11 @@ Features:
   boundary softens
 - Dirt paths winding through forest, scattered rocks, elevation shading
 - **Detailed side-view trees** (RimWorld-style) that stand up from the ground with
-  visible trunks and dappled, textured canopies — 6 species: layered conifers,
-  leafy green oaks, white-trunk **birch**, warm-gold **maple**, fiery **autumn**,
-  rare **pink-blossom cherry** accents, and bare **dead** trees. Drawn back-to-front
-  so nearer trees overlap the ones behind for real depth, with a gentle per-tree sway.
+  visible trunks and dappled, textured canopies — 7 species: sharp-tiered **pine**
+  conifers and their soft round-lobed **fir** siblings, leafy green oaks, white-trunk
+  **birch**, warm-gold **maple**, fiery **autumn**, rare **pink-blossom cherry**
+  accents, and bare **dead** trees. Drawn back-to-front so nearer trees overlap the
+  ones behind for real depth, with a gentle per-tree sway.
 - **Tree growth stages** — regrown trees sprout as tiny saplings and grow into
   towering mature trees over ~1–2 minutes, giving a full size ladder from short
   grass → tall grass → sapling → big tree; the starting forest has size variety too

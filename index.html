@@ -186,6 +186,7 @@ const SPECIES_MAPLE  = 2;   // NEW — buffer between birch & autumn
 const SPECIES_AUTUMN = 3;
 const SPECIES_DEAD   = 4;
 const SPECIES_CHERRY = 5;   // flowering cherry — rare pink-blossom accent tree
+const SPECIES_FIR    = 6;   // soft rounded fir — conifer sibling with scalloped foliage
 
 // Weather modes — ordered as a spectrum from driest to wettest so the
 // auto-cycle can drift one step at a time (sunny → clear → cloudy → … → storm).
@@ -242,7 +243,7 @@ const NEIGHBOURS = [
     [-1, 1],[ 0, 1],[ 1, 1],
 ];
 
-const TREE_NUM_VARIANTS  = 12;  // 6 species × 2 sizes
+const TREE_NUM_VARIANTS  = 14;  // 7 species × 2 sizes
 const TREE_SWAY_SLOTS    = TREE_NUM_VARIANTS * 32;  // sway tables: (treeVar << 5) | (i & 31)
 // Ground-cover variety, baked one slice per variant:
 //   0-9   lush grass (shade/density variations)
@@ -723,6 +724,7 @@ function renderTreeTopDown(c, ox, oy, w, h, variant) {
     const baseY = oy + h - 1;
     switch (species) {
         case SPECIES_PINE:   drawConiferSide(c, cx, baseY, w, h, sizeIdx); break;
+        case SPECIES_FIR:    drawFirSide(c, cx, baseY, w, h, sizeIdx); break;
         case SPECIES_BIRCH:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "birch"); break;
         case SPECIES_MAPLE:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "maple"); break;
         case SPECIES_AUTUMN: drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "autumn"); break;
@@ -854,6 +856,55 @@ function drawConiferSide(c, cx, baseY, w, h, sizeIdx) {
     c.fillRect((cx - 0.5) | 0, topY | 0, 1, 2);
 }
 
+// Fir: the conifer's softer sibling — same stacked tiers, but each tier is a row
+// of overlapping ROUNDED lobes (scalloped branch tips) instead of a sharp triangle,
+// in a slightly cooler green. Reads as the same evergreen family with a fuller,
+// rounded foliage shape.
+function drawFirSide(c, cx, baseY, w, h, sizeIdx) {
+    const trunkH = h * 0.13;
+    const trunkW = Math.max(2, w * 0.12);
+    drawGroundShadow(c, cx, baseY, w * 0.30);
+    drawTrunkSide(c, cx, baseY, trunkW, trunkH, false);
+
+    const dark = "#143f20", mid = "#216a31", lite = "#3a9648";   // cooler/bluer than the pine
+    const topY = baseY - h * 0.96;
+    const botY = baseY - trunkH * 0.5;
+    const tiers = 4 + sizeIdx;
+    const tierH = (botY - topY) / tiers;
+
+    for (let t = 0; t < tiers; t++) {
+        const ty = topY + t * tierH;
+        const tw = w * (0.14 + (t / tiers) * 0.42);   // wider toward the bottom
+        const lobes = 2 + t;                           // more rounded lobes lower down
+        const lobeR = (tw / Math.max(1, lobes)) * 1.25;
+        const by = ty + tierH * 1.0;                   // tier baseline
+        // dark scalloped base — a row of overlapping circles → soft bumpy tier edge
+        c.fillStyle = dark;
+        for (let l = 0; l <= lobes; l++) {
+            const lx = cx - tw + (2 * tw) * (l / lobes);
+            c.beginPath(); c.arc(lx, by, lobeR, 0, Math.PI * 2); c.fill();
+        }
+        // mid fill — slightly raised + smaller
+        c.fillStyle = mid;
+        for (let l = 0; l <= lobes; l++) {
+            const lx = cx - tw * 0.82 + (1.64 * tw) * (l / lobes);
+            c.beginPath(); c.arc(lx, by - tierH * 0.20, lobeR * 0.80, 0, Math.PI * 2); c.fill();
+        }
+        // lit highlights on the upper-left lobes
+        c.fillStyle = lite;
+        const hn = Math.max(1, lobes - 1);
+        for (let l = 0; l <= hn; l++) {
+            const lx = cx - tw * 0.68 + (tw * 0.85) * (l / hn);
+            c.beginPath(); c.arc(lx, by - tierH * 0.34, lobeR * 0.48, 0, Math.PI * 2); c.fill();
+        }
+    }
+    // soft rounded crown
+    c.fillStyle = mid;
+    c.beginPath(); c.arc(cx, topY + tierH * 0.25, Math.max(1.5, w * 0.09), 0, Math.PI * 2); c.fill();
+    c.fillStyle = lite;
+    c.fillRect((cx - 0.5) | 0, topY | 0, 1, 2);
+}
+
 // Dead tree: bare branching skeleton (pale grey or reddish-brown).
 function drawDeadSide(c, cx, baseY, w, h, sizeIdx) {
     const reddish = sizeIdx === 1;
@@ -943,7 +994,8 @@ function renderRockSprite(c, ox, oy, w, h, variant) {
 function pickTreeVariant() {
     const r = Math.random();
     let species;
-    if      (r < 0.46) species = SPECIES_PINE;
+    if      (r < 0.28) species = SPECIES_PINE;
+    else if (r < 0.46) species = SPECIES_FIR;      // ~18% — soft rounded conifer sibling
     else if (r < 0.62) species = SPECIES_BIRCH;
     else if (r < 0.75) species = SPECIES_MAPLE;
     else if (r < 0.87) species = SPECIES_AUTUMN;
