@@ -185,6 +185,7 @@ const SPECIES_BIRCH  = 1;
 const SPECIES_MAPLE  = 2;   // NEW — buffer between birch & autumn
 const SPECIES_AUTUMN = 3;
 const SPECIES_DEAD   = 4;
+const SPECIES_CHERRY = 5;   // flowering cherry — rare pink-blossom accent tree
 
 // Weather modes — ordered as a spectrum from driest to wettest so the
 // auto-cycle can drift one step at a time (sunny → clear → cloudy → … → storm).
@@ -241,7 +242,8 @@ const NEIGHBOURS = [
     [-1, 1],[ 0, 1],[ 1, 1],
 ];
 
-const TREE_NUM_VARIANTS  = 10;  // 5 species × 2 sizes
+const TREE_NUM_VARIANTS  = 12;  // 6 species × 2 sizes
+const TREE_SWAY_SLOTS    = TREE_NUM_VARIANTS * 32;  // sway tables: (treeVar << 5) | (i & 31)
 // Ground-cover variety, baked one slice per variant:
 //   0-9   lush grass (shade/density variations)
 //   10-12 tall grass
@@ -251,11 +253,13 @@ const TREE_NUM_VARIANTS  = 10;  // 5 species × 2 sizes
 //   28 flower patch  29 lavender  30 tulips  31 pampas grass  32 reeds  33 glowing mushrooms
 //   34-36 jungle broadleaf / fern / elephant-ear
 //   37 daisies  38 poppies  39 fireweed  40 buttercups  41 pebbles  42 leaf litter  43 wildflower meadow
-const GRASS_NUM_VARIANTS = 44;
+const GRASS_NUM_VARIANTS = 46;
 const GRASS_GLOWMUSH = 33;   // variant index whose cells emit a soft pulsing glow
 // Flower / clutter variants used to bias post-fire regrowth into a bloom meadow
 const GRASS_DAISY = 37, GRASS_POPPY = 38, GRASS_FIREWEED = 39,
       GRASS_BUTTERCUP = 40, GRASS_PEBBLES = 41, GRASS_LITTER = 42, GRASS_MEADOW = 43;
+const GRASS_CORNFLOWER = 44; // NEW — true-blue cornflowers (the one missing flower colour)
+const GRASS_BENT = 45;       // NEW — wispy seed-headed bent-grass (airy tall-grass texture)
 const TREE_TINTS = [
     { r: 32, g: 78,  b: 24 },  // darker green
     { r: 50, g: 105, b: 32 },  // brighter green
@@ -392,16 +396,16 @@ let treeLayerCamX = 0, treeLayerCamY = 0;       // camera pos at last FULL rebui
 let treeBandPhase = 0, treeBandTick = 0;        // amortized rebuild: which band, cadence counter
 let treeContentDirty = 0;                       // frames of fast banded refresh after a tree changed
 let treePrevCamX = 0, treePrevCamY = 0;         // camera last frame (motion detection)
-const treeSinTab = new Float32Array(320);       // per-rebuild sway offsets (treeVar × i&31)
+const treeSinTab = new Float32Array(TREE_SWAY_SLOTS);  // per-rebuild sway offsets (treeVar × i&31)
 // Per-combo sway VARIATION so trees don't all sway in lock-step: each (treeVar,
 // i&31) combo gets its own frequency, amplitude (skewed low → many trees barely
 // move) and phase. Built once. Indexed the same as treeSinTab.
-const treeSwayFreq  = new Float32Array(320);
-const treeSwayAmp   = new Float32Array(320);
-const treeSwayPhase = new Float32Array(320);
+const treeSwayFreq  = new Float32Array(TREE_SWAY_SLOTS);
+const treeSwayAmp   = new Float32Array(TREE_SWAY_SLOTS);
+const treeSwayPhase = new Float32Array(TREE_SWAY_SLOTS);
 let treeSwayBuilt = false;
 function buildTreeSwayTables() {
-    for (let k = 0; k < 320; k++) {
+    for (let k = 0; k < TREE_SWAY_SLOTS; k++) {
         treeSwayFreq[k]  = 0.55 + hash01(k, 11) * 0.75;        // 0.55 .. 1.30 × base speed
         const ha = hash01(k, 12);
         treeSwayAmp[k]   = 0.10 + ha * ha * 0.95;              // skewed low: most barely sway
@@ -722,6 +726,7 @@ function renderTreeTopDown(c, ox, oy, w, h, variant) {
         case SPECIES_BIRCH:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "birch"); break;
         case SPECIES_MAPLE:  drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "maple"); break;
         case SPECIES_AUTUMN: drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "autumn"); break;
+        case SPECIES_CHERRY: drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, "cherry"); break;
         case SPECIES_DEAD:   drawDeadSide(c, cx, baseY, w, h, sizeIdx); break;
     }
 }
@@ -788,6 +793,7 @@ function drawBroadleafSide(c, cx, baseY, w, h, sizeIdx, kind) {
     if (birch)            pal = ["#274d1c", "#3c7a2a", "#5fa843", "#84c662"];
     else if (kind === "maple")  pal = ["#5f5018", "#9c8327", "#caa53c", "#e6cb63"];
     else if (kind === "autumn") pal = ["#742612", "#a8451c", "#cc6a2a", "#e8a24e"];
+    else if (kind === "cherry") pal = ["#a8567a", "#d98ab0", "#efb2cd", "#fbe1ed"]; // pink blossom
     else                  pal = ["#1f4a1b", "#2f6e27", "#4e9a3a", "#74c057"]; // oak green
     const [dark, mid, lite, hi] = pal;
 
@@ -937,10 +943,11 @@ function renderRockSprite(c, ox, oy, w, h, variant) {
 function pickTreeVariant() {
     const r = Math.random();
     let species;
-    if      (r < 0.48) species = SPECIES_PINE;
-    else if (r < 0.64) species = SPECIES_BIRCH;
-    else if (r < 0.78) species = SPECIES_MAPLE;
-    else if (r < 0.91) species = SPECIES_AUTUMN;
+    if      (r < 0.46) species = SPECIES_PINE;
+    else if (r < 0.62) species = SPECIES_BIRCH;
+    else if (r < 0.75) species = SPECIES_MAPLE;
+    else if (r < 0.87) species = SPECIES_AUTUMN;
+    else if (r < 0.93) species = SPECIES_CHERRY;   // ~6% — occasional flowering accent
     else               species = SPECIES_DEAD;
     const sz = (Math.random() < 0.5) ? 0 : 1;
     return (species << 1) | sz;
@@ -988,7 +995,9 @@ function renderGrassTopDown(c, ox, oy, w, h, variant) {
     else if (variant === 40) drawButtercups(c, ox, oy, w, h);
     else if (variant === 41) drawPebbles(c, ox, oy, w, h);
     else if (variant === 42) drawLeafLitter(c, ox, oy, w, h);
-    else                     drawWildflowerMeadow(c, ox, oy, w, h);
+    else if (variant === GRASS_CORNFLOWER) drawCornflowers(c, ox, oy, w, h);
+    else if (variant === GRASS_BENT)       drawBentGrass(c, ox, oy, w, h);
+    else                     drawWildflowerMeadow(c, ox, oy, w, h);   // 43 + fallback
 }
 
 // --- Lush grass (10 shade/density variations) — rich jungle greens ---
@@ -1455,6 +1464,43 @@ function drawButtercups(c, ox, oy, w, h) {
     }
 }
 
+// --- Cornflowers: true-blue ragged star-heads on a green clump (the missing blue) ---
+function drawCornflowers(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 2);
+    const n = 3 + (Math.random() * 4 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 1 + Math.random() * (w - 2);
+        const cy = oy + 1 + Math.random() * (h - 2);
+        const pr = Math.max(0.9, w * 0.075);
+        c.fillStyle = "rgba(64,104,214,0.95)";                  // ragged outer rays
+        for (let p = 0; p < 5; p++) {
+            const a = (p / 5) * 6.2831853 + i;
+            c.fillRect((cx + Math.cos(a) * pr) | 0, (cy + Math.sin(a) * pr) | 0, 1, 1);
+        }
+        c.fillStyle = "rgba(108,148,238,0.95)";                 // light-blue petals
+        c.beginPath(); c.arc(cx, cy, pr * 0.7, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(22,34,96,0.95)";                    // deep-blue centre
+        c.fillRect((cx - 0.5) | 0, (cy - 0.5) | 0, 1, 1);
+    }
+}
+
+// --- Bent-grass: airy clump of tall thin blades tipped with pale seed heads ---
+function drawBentGrass(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const n = 5 + (Math.random() * 4 | 0);
+    for (let i = 0; i < n; i++) {
+        const bx = ox + 2 + Math.random() * (w - 4);
+        const by = oy + h - 1 - Math.random() * 2;
+        const bh = Math.max(3, h * (0.4 + Math.random() * 0.4));
+        const lean = (Math.random() - 0.5) * w * 0.18;
+        drawBlade(c, bx, by, bh, lean, 70, 96, 46, 0.9);        // tall green blade
+        c.fillStyle = "rgba(214,200,150,0.9)";                  // pale seed head at the tip
+        c.fillRect((bx + lean) | 0, (by - bh) | 0, 1, 1);
+        c.fillStyle = "rgba(236,226,186,0.75)";
+        c.fillRect((bx + lean) | 0, (by - bh - 1) | 0, 1, 1);
+    }
+}
+
 // --- Pebbles: small grey/tan stones (ground clutter, not a plant) ---
 function drawPebbles(c, ox, oy, w, h) {
     drawLushGrass(c, ox, oy, w, h, 3);
@@ -1519,9 +1565,11 @@ function pickGrassVariant() {
     const r = Math.random();
     if (r < 0.42) return (Math.random() * 10) | 0;        // 0-9  lush grass
     if (r < 0.50) return 10 + (Math.random() * 3 | 0);    // 10-12 tall grass
-    if (r < 0.57) return 34 + (Math.random() * 3 | 0);    // 34-36 jungle plants (broadleaf/fern/ear)
-    if (r < 0.61) return 13 + (Math.random() * 3 | 0);    // 13-15 dry grass (rarer in a jungle)
+    if (r < 0.53) return GRASS_BENT;                      // 45 wispy seed-head bent-grass
+    if (r < 0.59) return 34 + (Math.random() * 3 | 0);    // 34-36 jungle plants (broadleaf/fern/ear)
+    if (r < 0.62) return 13 + (Math.random() * 3 | 0);    // 13-15 dry grass (rarer in a jungle)
     if (r < 0.70) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
+    if (r < 0.725) return GRASS_CORNFLOWER;               // 44 true-blue cornflowers
     // --- richer flower / clutter band ---
     if (r < 0.735) return GRASS_DAISY;        // 37 daisies
     if (r < 0.765) return GRASS_BUTTERCUP;    // 40 buttercups
@@ -3573,22 +3621,32 @@ function hash01(seed, n) {
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-// Build a clip path for a burn-scar cell that BORDERS WATER: the water-facing
-// edges are pulled in and rounded so the opaque scar recedes organically from
-// the shoreline (revealing the soft bank beneath) instead of cutting a hard
-// square into the river. Land-facing edges stay at full extent (square corners)
-// so adjacent scar cells still tile seamlessly with no gaps.
-function scarLandPath(c, px, py, cell, wN, wE, wS, wW) {
-    const inset = cell * 0.34;
-    const rad = cell * 0.30;
-    const xL = px + (wW ? inset : 0);
-    const xR = px + cell - (wE ? inset : 0);
-    const yT = py + (wN ? inset : 0);
-    const yB = py + cell - (wS ? inset : 0);
-    const rTL = (wN || wW) ? rad : 0;
-    const rTR = (wN || wE) ? rad : 0;
-    const rBR = (wS || wE) ? rad : 0;
-    const rBL = (wS || wW) ? rad : 0;
+// A burn-scar cell is any cold/ash/regrowth state — these tile into solid blobs.
+function isScarState(s) {
+    return s === ASH_GRASS || s === ASH_TREE || s === CHARRED ||
+           s === CHAR_COOL || s === SCORCH || s === SPROUT;
+}
+
+// Build a clip path for a burn-scar cell whose edges face NON-scar terrain (grass,
+// dirt, water, tree): those edges are pulled in and rounded by a per-cell jittered
+// amount so the opaque scar recedes organically and reveals the ground baked
+// beneath it (grass / soft bank), instead of cutting a hard square grid into its
+// surroundings. Edges SHARED with another scar cell stay at full extent (square
+// corners) so the scar blob still tiles seamlessly with no gaps — only the blob's
+// outer boundary softens, and the jitter keeps that boundary irregular rather than
+// a uniform lattice of rounded squares.
+function scarLandPath(c, px, py, cell, eN, eE, eS, eW, i) {
+    const seed = (i * 2654435761) >>> 0;
+    const ins = (n) => cell * (0.20 + hash01(seed, n) * 0.20);   // 0.20–0.40, irregular
+    const rad = cell * 0.26;
+    const xL = px + (eW ? ins(1) : 0);
+    const xR = px + cell - (eE ? ins(2) : 0);
+    const yT = py + (eN ? ins(3) : 0);
+    const yB = py + cell - (eS ? ins(4) : 0);
+    const rTL = (eN || eW) ? rad : 0;
+    const rTR = (eN || eE) ? rad : 0;
+    const rBR = (eS || eE) ? rad : 0;
+    const rBL = (eS || eW) ? rad : 0;
     c.beginPath();
     c.moveTo(xL + rTL, yT);
     c.lineTo(xR - rTR, yT);
@@ -3650,15 +3708,16 @@ function renderStaticLayer() {
             // opaque scar melts into the river bank instead of cutting a hard
             // square. Only the few shoreline scar cells pay the clip cost.
             let clipped = false;
-            if (s === ASH_GRASS || s === ASH_TREE || s === CHARRED ||
-                s === CHAR_COOL || s === SCORCH || s === SPROUT) {
-                const wN = y > 0        && grid[i - cols] === WATER;
-                const wS = y < rows - 1 && grid[i + cols] === WATER;
-                const wW = x > 0        && grid[i - 1]    === WATER;
-                const wE = x < cols - 1 && grid[i + 1]    === WATER;
-                if (wN || wS || wW || wE) {
+            if (isScarState(s)) {
+                // Recede from every edge facing NON-scar terrain so the scar blob's
+                // outline melts into the grass/bank rather than a hard square grid.
+                const eN = !(y > 0        && isScarState(grid[i - cols]));
+                const eS = !(y < rows - 1 && isScarState(grid[i + cols]));
+                const eW = !(x > 0        && isScarState(grid[i - 1]));
+                const eE = !(x < cols - 1 && isScarState(grid[i + 1]));
+                if (eN || eS || eW || eE) {
                     sc.save();
-                    scarLandPath(sc, px, py, cell, wN, wE, wS, wW);
+                    scarLandPath(sc, px, py, cell, eN, eE, eS, eW, i);
                     sc.clip();
                     clipped = true;
                 }
@@ -4130,7 +4189,7 @@ function render() {
         if (!treeSwayBuilt) buildTreeSwayTables();
         // Each combo sways at its OWN frequency / amplitude / phase → a messy,
         // natural canopy where some trees barely stir and others sway more.
-        for (let k = 0; k < 320; k++) {
+        for (let k = 0; k < TREE_SWAY_SLOTS; k++) {
             treeSinTab[k] = swayWxF * Math.sin(swayT * treeSwayFreq[k] + treeSwayPhase[k]) * swayScale * treeSwayAmp[k];
         }
         const cx0 = Math.max(0, ((rx0 - maxDw / 2 - cell) / cell) | 0);

@@ -29,15 +29,18 @@ Features:
 - Rivers, ponds, shoreline tree reflections — smooth blurred-mask shorelines
   (deep water → shallow rim, no blocky/circle edges). Optional lily pads with
   flowers (off by default — toggle in properties).
-- **Burn scars blend into the shoreline** — a burnt cell that borders water draws
-  with an organic, receded edge so the scar melts into the river bank instead of
-  cutting a hard square into the smooth water
+- **Burn scars blend into their surroundings** — a scar cell whose edge faces
+  non-burnt terrain (grass, dirt, water) draws with an organic, jittered, receded
+  edge that reveals the ground baked beneath, so the scar blob's outline melts into
+  the grass and river bank instead of cutting a hard square grid. Edges shared with
+  another scar cell stay square, so the blob still tiles seamlessly — only its outer
+  boundary softens
 - Dirt paths winding through forest, scattered rocks, elevation shading
 - **Detailed side-view trees** (RimWorld-style) that stand up from the ground with
-  visible trunks and dappled, textured canopies — 5 species: layered conifers,
+  visible trunks and dappled, textured canopies — 6 species: layered conifers,
   leafy green oaks, white-trunk **birch**, warm-gold **maple**, fiery **autumn**,
-  and bare **dead** trees. Drawn back-to-front so nearer trees overlap the ones
-  behind for real depth, with a gentle per-tree sway.
+  rare **pink-blossom cherry** accents, and bare **dead** trees. Drawn back-to-front
+  so nearer trees overlap the ones behind for real depth, with a gentle per-tree sway.
 - **Tree growth stages** — regrown trees sprout as tiny saplings and grow into
   towering mature trees over ~1–2 minutes, giving a full size ladder from short
   grass → tall grass → sapling → big tree; the starting forest has size variety too
@@ -49,8 +52,9 @@ Features:
   slider.
 - **Lush green jungle floor** — a mossy green ground (not bare brown dirt) carpeted
   in dense green growth, for a verdant, almost-jungle look
-- **44 ground-cover types** baked into the grass atlas: ten lush-grass variations,
-  tall grass, dry grass, six wildflower colours, clover, ferns, shrubs, dandelion
+- **46 ground-cover types** baked into the grass atlas: ten lush-grass variations,
+  tall grass, **wispy seed-head bent-grass**, dry grass, six wildflower colours,
+  **true-blue cornflowers**, clover, ferns, shrubs, dandelion
   puffs, spotted mushrooms, berry bushes, flower patches, lavender, tulips,
   pampas-grass plumes, reeds/cattails, **glowing bioluminescent mushrooms**,
   **jungle plants** (broadleaf clumps, big jungle ferns, elephant-ear leaves), and
