@@ -569,7 +569,7 @@
             },
             "scrollZoom": {
                 "order": 86,
-                "text":   "Mouse wheel zooms (rebuilds the world)",
+                "text":   "Mouse wheel zooms the view (up to 3×, keeps the world)",
                 "type":   "bool",
                 "value":  true
             },

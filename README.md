@@ -20,7 +20,9 @@ Features:
   swells in spring/summer and thins toward winter.
 - **Interactive** — left-click (or hold to pour) starts a wildfire at the cursor;
   **right-click drops a rain burst** that puts fires out with steam; **scroll the
-  mouse wheel to zoom**. All three are individually toggleable.
+  mouse wheel to zoom the view in (up to 3×, toward the cursor)** — a pure camera
+  zoom that *keeps the world and any live fire*, no regeneration. All three are
+  individually toggleable.
 - Procedural noise terrain (biomes, clearings, dense pockets)
 - Rivers, ponds, shoreline tree reflections — smooth blurred-mask shorelines
   (deep water → shallow rim, no blocky/circle edges). Optional lily pads with

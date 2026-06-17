@@ -319,6 +319,9 @@ let regrowPhase = 0;   // rotating 0..3 offset for the strided regrowth pass
 // Camera: the world is bigger than the viewport; (camX,camY) is the world-pixel
 // position of the screen's top-left corner.
 let camX = 0, camY = 0;
+let viewZoom = 1;                 // scroll-wheel camera zoom (1 = normal). Pure view
+                                  // scale — does NOT regenerate the world, so the
+                                  // forest + any live fire are preserved while zooming.
 let worldPxW = 0, worldPxH = 0;   // world size in pixels (cols*cell, rows*cell)
 
 // Cached colour strings for the hot particle loops. Building thousands of
@@ -2643,11 +2646,11 @@ function update(dt = SIM_DT) {
     // Hold-to-pour — keep igniting at the cursor while the button is held (not just
     // on move), so holding still pours a growing fire.
     if (mouseDown && props.holdToPour && props.mouseInteraction && mouseInside) {
-        igniteAt(mouseX + camX, mouseY + camY, props.igniteRadius);
+        igniteAt(camX + mouseX / viewZoom, camY + mouseY / viewZoom, props.igniteRadius);
     }
     // Hold right-button → a sustained rain shower on the spot (douses fire).
     if (rightDown && props.rightClickDouse && props.mouseInteraction && mouseInside) {
-        douseAt(mouseX + camX, mouseY + camY, Math.max(3, props.igniteRadius + 2));
+        douseAt(camX + mouseX / viewZoom, camY + mouseY / viewZoom, Math.max(3, props.igniteRadius + 2));
     }
     // Wind — base + gust burst, audio bass also nudges strength briefly
     windAngle += 0.003 * props.windRotation * dt;
@@ -3731,8 +3734,9 @@ function renderStaticLayer() {
 // Render
 // ============================================================
 function updateCamera() {
-    const maxX = Math.max(0, worldPxW - canvas.width);
-    const maxY = Math.max(0, worldPxH - canvas.height);
+    // Visible world extent shrinks as you zoom in, so you can pan a little further.
+    const maxX = Math.max(0, worldPxW - canvas.width / viewZoom);
+    const maxY = Math.max(0, worldPxH - canvas.height / viewZoom);
     if (props.mousePan && mouseInside && (maxX > 0 || maxY > 0)) {
         // View slews toward the mouse: off-centre mouse → pan that way.
         const cxs = canvas.width * 0.5, cys = canvas.height * 0.5;
@@ -3777,10 +3781,14 @@ function render() {
     if (staticThrottle > 0) staticThrottle--;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    // Shift into world space for the camera; world layers draw at world coords and
-    // only the visible window lands on screen.
-    ctx.translate(-camX, -camY);
+    // Shift into world space for the camera + apply the scroll-wheel view zoom:
+    // world point (wx,wy) → screen ((wx-camX)*z, (wy-camY)*z). All world-coord
+    // drawing (layer blits + drawX/drawY particles) scales automatically.
+    const z = viewZoom;
+    ctx.setTransform(z, 0, 0, z, -camX * z, -camY * z);
     // Blit only the visible region of the (large) world ground canvas — cheap.
+    // (When zoomed in we over-blit a little off-screen, which is clipped — cost
+    // stays at the un-zoomed baseline, never worse.)
     drawWorldLayer(staticCanvas, camX, camY, w, h);
 
     // Cheap water sparkles + ripple bands (animated on top of baked water).
@@ -4701,9 +4709,10 @@ function render() {
         ctx.globalAlpha = 1;
     }
 
-    // Mouse hover indicator — small ignition-radius preview
+    // Mouse hover indicator — small ignition-radius preview (screen-space, so the
+    // world radius is scaled by the view zoom)
     if (props.showMouseHint && props.mouseInteraction && mouseInside) {
-        const r = Math.max(1, props.igniteRadius) * cell;
+        const r = Math.max(1, props.igniteRadius) * cell * viewZoom;
         ctx.save();
         ctx.strokeStyle = "rgba(255,180,80,0.55)";
         ctx.lineWidth = 1.2;
@@ -4874,12 +4883,12 @@ function loop() {
 let mouseDown = false, rightDown = false, zoomPending = 0;
 function onIgniteInput(clientX, clientY) {
     if (!props.mouseInteraction) return;
-    // map the screen cursor into world coordinates (account for the camera)
-    igniteAt(clientX + camX, clientY + camY, props.igniteRadius);
+    // map the screen cursor into world coordinates (account for camera + zoom)
+    igniteAt(camX + clientX / viewZoom, camY + clientY / viewZoom, props.igniteRadius);
 }
 function onDouseInput(clientX, clientY) {
     if (!props.mouseInteraction || !props.rightClickDouse) return;
-    douseAt(clientX + camX, clientY + camY, Math.max(3, props.igniteRadius + 2));
+    douseAt(camX + clientX / viewZoom, camY + clientY / viewZoom, Math.max(3, props.igniteRadius + 2));
 }
 canvas.addEventListener("mousedown",  e => {
     if (e.button === 2) { rightDown = true; onDouseInput(e.clientX, e.clientY); }
@@ -4898,9 +4907,21 @@ canvas.addEventListener("mousemove",  e => {
 canvas.addEventListener("wheel", e => {
     if (!props.scrollZoom) return;
     e.preventDefault();
-    props.cellSize = Math.max(4, Math.min(40, props.cellSize + (e.deltaY < 0 ? 2 : -2)));
-    clearTimeout(zoomPending);
-    zoomPending = setTimeout(() => { buildSpriteAtlases(); rebuildGrid(); markTerrainDirty(); }, 150);
+    // Pure VIEW zoom (camera scale) toward the cursor — the world is preserved, no
+    // regeneration. Zoom in up to 3×; scroll back to 1× for normal.
+    const z0 = viewZoom;
+    const z1 = Math.max(1, Math.min(3, +(z0 + (e.deltaY < 0 ? 0.5 : -0.5)).toFixed(3)));
+    if (z1 === z0) return;
+    const W = canvas.width, H = canvas.height;
+    const fx = camX + e.clientX / z0, fy = camY + e.clientY / z0;   // world point under cursor
+    viewZoom = z1;
+    camX = fx - e.clientX / z1;                                     // keep that point fixed
+    camY = fy - e.clientY / z1;
+    const maxX = Math.max(0, worldPxW - W / z1), maxY = Math.max(0, worldPxH - H / z1);
+    camX = Math.max(0, Math.min(maxX, camX));
+    camY = Math.max(0, Math.min(maxY, camY));
+    props.panX = maxX > 0 ? camX / maxX : 0.5;                      // sync so panning eases from here
+    props.panY = maxY > 0 ? camY / maxY : 0.5;
 }, { passive: false });
 canvas.addEventListener("mouseleave", () => { mouseInside = false; mouseDown = false; rightDown = false; });
 canvas.addEventListener("mouseenter", e => { mouseInside = true; mouseX = e.clientX; mouseY = e.clientY; });
