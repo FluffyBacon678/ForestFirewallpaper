@@ -217,6 +217,21 @@ Key optimizations:
   fills reuse interned `rgb()` strings (colour quantized to 16 levels, exact
   opacity via `globalAlpha`) instead of building `rgba(…)` strings every draw,
   eliminating the GC pauses that caused periodic micro-stutters
+- **Pooled particles** — the two highest-volume systems (smoke, embers) recycle
+  dead objects through a free-list instead of allocating fresh ones each spawn,
+  so a roaring fire (hundreds of spawns/sec) adds almost nothing to the young-gen
+  GC over a long run
+- **Prebuilt glow sprites** — cloud shadows and mushroom halos blit a once-baked
+  soft-radial canvas (tinted via `globalAlpha`) instead of building a fresh
+  `createRadialGradient` every frame — faster *and* allocation-free
+- **Staggered heavy rebuilds** — a static-scar rebuild and a swaying-tree band
+  never run on the same frame (the band yields one frame, invisible at the sway
+  rate), so the two biggest periodic jobs can't collide into a spike
+- **Adaptive frame-budget governor** — watches the smoothed frame time and, *only*
+  when frames run long for a sustained stretch, trims the cheapest-to-lose detail
+  (water-sparkle count, smoke billow-lobe cadence, glow-blur radius) then restores
+  the instant there's headroom. Capable hardware always runs full quality; a weak
+  GPU gets a 60 fps floor with a near-invisible (~0.75 % mean-pixel) trade
 - **Half-resolution fire-glow blur** — the bloom is blurred at half size and
   upscaled, a quarter of the blur work for the same soft glow
 - **Strided regrowth** — the full-grid ash/regrowth pass visits ¼ of the cells

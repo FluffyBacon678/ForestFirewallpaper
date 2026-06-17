@@ -282,6 +282,28 @@ let burnMax, fireHeat;
 let treeGrowth;
 let smokeParticles = [];
 let embers = [];
+// Object pools for the two highest-volume particle systems. A roaring fire spawns
+// hundreds of puffs/embers per second; recycling dead objects instead of building
+// fresh `{...}` literals removes that steady allocation, so the young-gen GC fires
+// far less often (no periodic stutter over a long run). Dead objects are returned
+// to the pool during the in-place compaction pass and re-initialised on spawn.
+const smokePool = [];
+const emberPool = [];
+function spawnSmoke(x, y, vx, vy, life, size, grow, shade, swirl, swirlSpd) {
+    const p = smokePool.length ? smokePool.pop() : {};
+    p.x = x; p.y = y; p.px = x; p.py = y;   // px/py reset → no streak from a recycled object
+    p.vx = vx; p.vy = vy;
+    p.life = life; p.size = size; p.grow = grow; p.shade = shade;
+    p.swirl = swirl; p.swirlSpd = swirlSpd; // swirl === undefined → no billow turbulence/lobe
+    smokeParticles.push(p);
+}
+function spawnEmber(x, y, vx, vy, life, size, phase) {
+    const p = emberPool.length ? emberPool.pop() : {};
+    p.x = x; p.y = y; p.px = x; p.py = y;
+    p.vx = vx; p.vy = vy;
+    p.life = life; p.size = size; p.phase = phase;
+    embers.push(p);
+}
 let windStreaks = [];
 let leaves = [];
 let lightningBolts = [];
@@ -339,6 +361,23 @@ function rgbQ(r, g, b) {
     }
     return s;
 }
+
+// Prebuilt soft radial-glow sprites. Cloud shadows + mushroom halos used to build a
+// fresh createRadialGradient (+ rgba colour-stop strings) every frame; baking each
+// into a small canvas once lets us blit it (faster than a gradient fill) and tint
+// opacity via globalAlpha — no per-frame allocation. Center alpha is baked at 1 and
+// scaled by globalAlpha at draw time, so the look matches the old gradients exactly.
+function makeRadialSprite(stops, size) {
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = size;
+    const c = cv.getContext("2d");
+    const g = c.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    for (const [pos, col] of stops) g.addColorStop(pos, col);
+    c.fillStyle = g;
+    c.fillRect(0, 0, size, size);
+    return cv;
+}
+let mushroomSprite = null, cloudSprite = null;
 
 let glowCanvas, glowCtx;
 let glowHalf = null, glowHalfCtx = null; // half-res scratch for the glow blur
@@ -404,6 +443,12 @@ const STATIC_REBUILD_MIN_GAP = 3; // re-bake at most every N frames even if dirt
 // FPS + fixed-timestep simulation
 let lastFrameMs   = 0;
 let avgFps        = 60;
+// Adaptive frame-budget governor: 1 = full quality, → 0 = shedding invisible detail.
+// Driven by avgFps vs the target frame time; only dips below 1 if frames run long for
+// a sustained stretch, and eases back to 1 the moment there's headroom. Lets a weak
+// GPU hold 60fps by trimming the cheapest-to-lose detail, while capable hardware
+// (where avgFps sits at target) always runs at perfQuality = 1 — full quality.
+let perfQuality   = 1;
 let lastSimMs     = 0;
 let simClock      = 0;           // baseline ticks; advances smoothly at SIM_BASE_HZ
 let simAlpha      = 1;           // render interpolation between fixed sim ticks
@@ -1946,12 +1991,9 @@ function douseAt(px, py, radius) {
             if (isTree) treeContentDirty = 12;
             // A little hiss of steam where a flame is doused
             if (smokeParticles.length < MAX_SMOKE && Math.random() < 0.7) {
-                smokeParticles.push({
-                    x: nx * cell + cell * 0.5, y: ny * cell + cell * 0.5,
-                    vx: (Math.random() - 0.5) * 0.6, vy: -1.0 - Math.random() * 0.7,
-                    life: 0.55, size: 4 + Math.random() * 4, grow: 0.32,
-                    shade: 212 + (Math.random() * 40 | 0),
-                });
+                spawnSmoke(nx * cell + cell * 0.5, ny * cell + cell * 0.5,
+                    (Math.random() - 0.5) * 0.6, -1.0 - Math.random() * 0.7,
+                    0.55, 4 + Math.random() * 4, 0.32, 212 + (Math.random() * 40 | 0));
             }
         }
     }
@@ -2506,14 +2548,9 @@ function updateRain(dt) {
                             if (isTree) treeContentDirty = 12;    // tree vanished → fast banded refresh (no full-rebuild spike)
                             // Steam puff (light, wispy)
                             if (smokeParticles.length < MAX_SMOKE) {
-                                smokeParticles.push({
-                                    x: px,
-                                    y: py,
-                                    vx: 0, vy: -1.0,
-                                    life: 0.5, size: 5, grow: 0.3,
-                                    shade: 205 + (Math.random() * 35 | 0),
-                                    swirl: Math.random() * 6.28, swirlSpd: 0.06,
-                                });
+                                spawnSmoke(px, py, 0, -1.0, 0.5, 5, 0.3,
+                                    205 + (Math.random() * 35 | 0),
+                                    Math.random() * 6.28, 0.06);
                             }
                             break;
                         }
@@ -2769,18 +2806,17 @@ function update(dt = SIM_DT) {
                 const shade = isTree
                     ? (58 + Math.random() * 64) | 0
                     : (104 + Math.random() * 64) | 0;
-                smokeParticles.push({
-                    x:    x * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
-                    y:    y * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
-                    vx:   wxF * sMag + (Math.random() - 0.5) * 0.4,
-                    vy:   wyF * sMag + (Math.random() - 0.5) * 0.4,
-                    life: isTree ? 1.0 : 0.55,
-                    size: (isTree ? 4 : 2) + Math.random() * 3,
-                    grow: isTree ? 0.22 : 0.10,
+                spawnSmoke(
+                    x * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
+                    y * cell + cell * 0.5 + (Math.random() - 0.5) * cell,
+                    wxF * sMag + (Math.random() - 0.5) * 0.4,
+                    wyF * sMag + (Math.random() - 0.5) * 0.4,
+                    isTree ? 1.0 : 0.55,
+                    (isTree ? 4 : 2) + Math.random() * 3,
+                    isTree ? 0.22 : 0.10,
                     shade,
-                    swirl: Math.random() * 6.28,            // billowing-turbulence phase
-                    swirlSpd: 0.05 + Math.random() * 0.06,
-                });
+                    Math.random() * 6.28,                   // billowing-turbulence phase
+                    0.05 + Math.random() * 0.06);
             }
         }
 
@@ -2789,15 +2825,14 @@ function update(dt = SIM_DT) {
         const smolderAmt = Math.max(0, 1 - intensity * 1.4);
         if (props.showSmoke && smolderAmt > 0.12 && smokeParticles.length < (MAX_SMOKE * qMul) | 0
             && Math.random() < (isTree ? 0.05 : 0.035) * smolderAmt * dt) {
-            smokeParticles.push({
-                x: x * cell + cell * 0.5 + (Math.random() - 0.5) * cell * 0.5,
-                y: y * cell + cell * 0.4 + (Math.random() - 0.5) * cell * 0.3,
-                vx: wxF * 0.3 * props.windStrength + (Math.random() - 0.5) * 0.2,
-                vy: -0.4 - Math.random() * 0.4,             // slow rise
-                life: 0.45, size: 1.3 + Math.random() * 1.2, grow: 0.05,
-                shade: 110 + (Math.random() * 45 | 0),      // thin grey
-                swirl: Math.random() * 6.28, swirlSpd: 0.05 + Math.random() * 0.05,
-            });
+            spawnSmoke(
+                x * cell + cell * 0.5 + (Math.random() - 0.5) * cell * 0.5,
+                y * cell + cell * 0.4 + (Math.random() - 0.5) * cell * 0.3,
+                wxF * 0.3 * props.windStrength + (Math.random() - 0.5) * 0.2,
+                -0.4 - Math.random() * 0.4,                 // slow rise
+                0.45, 1.3 + Math.random() * 1.2, 0.05,
+                110 + (Math.random() * 45 | 0),             // thin grey
+                Math.random() * 6.28, 0.05 + Math.random() * 0.05);
         }
 
         // Creeping front — the advancing edge throws extra sparks as it eats fresh
@@ -2827,11 +2862,9 @@ function update(dt = SIM_DT) {
                 });
             }
             for (let e = 0; e < 3 && embers.length < (MAX_EMBERS * qMul); e++) {
-                embers.push({
-                    x: x * cell + cell * 0.5, y: y * cell + cell * 0.5,
-                    vx: (Math.random() - 0.5) * 1.4, vy: -(1.0 + Math.random() * 1.6),
-                    life: 0.9 + Math.random() * 0.5, size: 1.1 + Math.random() * 1.2, phase: Math.random() * 6.28,
-                });
+                spawnEmber(x * cell + cell * 0.5, y * cell + cell * 0.5,
+                    (Math.random() - 0.5) * 1.4, -(1.0 + Math.random() * 1.6),
+                    0.9 + Math.random() * 0.5, 1.1 + Math.random() * 1.2, Math.random() * 6.28);
             }
         }
 
@@ -2839,15 +2872,14 @@ function update(dt = SIM_DT) {
         if (props.showEmbers && embers.length < (MAX_EMBERS * qMul) | 0) {
             const emberChance = (isTree ? 0.10 : 0.025) * output;
             if (Math.random() < emberChance * dt) {
-                embers.push({
-                    x: x * cell + cell * 0.5,
-                    y: y * cell + cell * 0.5,
-                    vx: wxF * (0.9 + Math.random() * 1.2) * props.windStrength + (Math.random() - 0.5) * 1.2,
-                    vy: wyF * (0.9 + Math.random() * 1.2) * props.windStrength + (Math.random() - 0.5) * 1.2,
-                    life: 0.7 + Math.random() * 0.5,
-                    size: 1.0 + Math.random() * 1.3,
-                    phase: Math.random() * 6.28,
-                });
+                spawnEmber(
+                    x * cell + cell * 0.5,
+                    y * cell + cell * 0.5,
+                    wxF * (0.9 + Math.random() * 1.2) * props.windStrength + (Math.random() - 0.5) * 1.2,
+                    wyF * (0.9 + Math.random() * 1.2) * props.windStrength + (Math.random() - 0.5) * 1.2,
+                    0.7 + Math.random() * 0.5,
+                    1.0 + Math.random() * 1.3,
+                    Math.random() * 6.28);
             }
         }
 
@@ -2935,15 +2967,14 @@ function update(dt = SIM_DT) {
                 && embers.length < (MAX_EMBERS * qMul) | 0 && Math.random() < 0.02 * sdt) {
                 const y = (i / cols) | 0;
                 const x = i - y * cols;
-                embers.push({
-                    x: x * cell + cell * 0.5 + jitterX[i] + (Math.random() - 0.5) * cell * 0.3,
-                    y: y * cell + cell * 0.5 + jitterY[i] + (Math.random() - 0.5) * cell * 0.3,
-                    vx: wxF * 0.25 * props.windStrength + (Math.random() - 0.5) * 0.3,
-                    vy: wyF * 0.25 * props.windStrength + (Math.random() - 0.5) * 0.3,
-                    life: 0.35 + Math.random() * 0.30,
-                    size: 0.7 + Math.random() * 0.5,
-                    phase: Math.random() * 6.28,
-                });
+                spawnEmber(
+                    x * cell + cell * 0.5 + jitterX[i] + (Math.random() - 0.5) * cell * 0.3,
+                    y * cell + cell * 0.5 + jitterY[i] + (Math.random() - 0.5) * cell * 0.3,
+                    wxF * 0.25 * props.windStrength + (Math.random() - 0.5) * 0.3,
+                    wyF * 0.25 * props.windStrength + (Math.random() - 0.5) * 0.3,
+                    0.35 + Math.random() * 0.30,
+                    0.7 + Math.random() * 0.5,
+                    Math.random() * 6.28);
             }
             // Crackle — a hot coal occasionally snaps off a couple of bright sparks
             if (props.showEmbers && burnTimer[i] > 200 && sparks.length < (MAX_SPARKS * qMul) | 0
@@ -3207,6 +3238,7 @@ function update(dt = SIM_DT) {
             p.size += p.grow * dt;
             p.life -= 0.0075 * dt;
             if (p.life > 0) smokeParticles[writeI++] = p;
+            else if (smokePool.length < MAX_SMOKE) smokePool.push(p);   // recycle
         }
         smokeParticles.length = writeI;
     }
@@ -3272,6 +3304,8 @@ function update(dt = SIM_DT) {
                     }
                 }
                 embers[writeI++] = p;
+            } else if (emberPool.length < MAX_EMBERS) {
+                emberPool.push(p);   // recycle dead ember
             }
         }
         embers.length = writeI;
@@ -3777,7 +3811,10 @@ function render() {
     // Rebuild on a scar change OR when the camera has panned far enough to reveal
     // un-baked world (the static layer now only refreshes its visible window).
     const staticMoved = Math.abs(camX - staticCamX) > 180 || Math.abs(camY - staticCamY) > 180;
-    if ((staticDirty || staticMoved) && staticThrottle <= 0) renderStaticLayer();
+    // Frame-pacing: track when a heavy rebuild runs this frame so the tree-band
+    // rebuild (further down) can yield and never collide with it into one spike.
+    let heavyJobThisFrame = false;
+    if ((staticDirty || staticMoved) && staticThrottle <= 0) { renderStaticLayer(); heavyJobThisFrame = true; }
     if (staticThrottle > 0) staticThrottle--;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -3800,7 +3837,8 @@ function render() {
         const wy0 = Math.max(0, (camY / cell) | 0);
         const wcw = Math.min(cols - wx0, Math.ceil(w / cell) + 1);
         const wch = Math.min(rows - wy0, Math.ceil(h / cell) + 1);
-        for (let k = 0; k < 36; k++) {
+        const sparkN = (14 + 22 * perfQuality) | 0;   // 36 at full quality → 14 under load
+        for (let k = 0; k < sparkN; k++) {
             const x = wx0 + ((Math.random() * wcw) | 0);
             const y = wy0 + ((Math.random() * wch) | 0);
             const i = y * cols + x;
@@ -3924,6 +3962,8 @@ function render() {
     // Glowing-mushroom halos — soft cyan pulse at ground level (below trees, so a
     // canopy occludes one beneath it). Brighter when the scene is dark/wet.
     if (glowSpots.length) {
+        if (!mushroomSprite) mushroomSprite = makeRadialSprite([
+            [0, "rgba(120,230,215,1)"], [0.5, "rgba(60,190,185,0.4)"], [1, "rgba(40,160,170,0)"]], 64);
         const moodBoost = 1 + weatherIntensitySmooth * 0.4; // pops a little in storm gloom
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
@@ -3931,34 +3971,25 @@ function render() {
             const pulse = 0.55 + Math.sin(renderTimeSec * 3.0 + s.phase) * 0.45;
             const a = pulse * 0.24 * moodBoost;          // much subtler than before
             const rr = s.r * 0.7;                          // smaller halo
-            const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, rr);
-            grad.addColorStop(0,   `rgba(120,230,215,${(a).toFixed(3)})`);
-            grad.addColorStop(0.5, `rgba(60,190,185,${(a * 0.4).toFixed(3)})`);
-            grad.addColorStop(1,   "rgba(40,160,170,0)");
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.arc(s.x, s.y, rr, 0, Math.PI * 2);
-            ctx.fill();
+            ctx.globalAlpha = a;
+            ctx.drawImage(mushroomSprite, s.x - rr, s.y - rr, rr * 2, rr * 2);
         }
+        ctx.globalAlpha = 1;
         ctx.restore();
     }
 
     // Cloud shadows — soft dark patches on the ground (below trees)
     if (props.showClouds && clouds.length) {
         ctx.save();
+        if (!cloudSprite) cloudSprite = makeRadialSprite([
+            [0, "rgba(40,40,55,1)"], [0.2, "rgba(40,40,55,1)"], [1, "rgba(80,80,95,0)"]], 64);
         ctx.globalCompositeOperation = "multiply";
         for (const c of clouds) {
             const cx = drawX(c), cy = drawY(c);
-            // Radial gradient shadow
-            const grad = ctx.createRadialGradient(cx, cy, c.size * 0.20, cx, cy, c.size);
-            const a = c.opacity.toFixed(3);
-            grad.addColorStop(0, `rgba(40,40,55,${a})`);
-            grad.addColorStop(1, "rgba(80,80,95,0)");
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.arc(cx, cy, c.size, 0, Math.PI * 2);
-            ctx.fill();
+            ctx.globalAlpha = c.opacity;
+            ctx.drawImage(cloudSprite, cx - c.size, cy - c.size, c.size * 2, c.size * 2);
         }
+        ctx.globalAlpha = 1;
         ctx.restore();
     }
 
@@ -4151,7 +4182,10 @@ function render() {
             // (burn/sprout) so the canopy stays current without a full-rebuild spike.
             const bandEvery = (swaying || moving || treeContentDirty > 0) ? 1 : 6;
             if (treeContentDirty > 0) treeContentDirty--;
-            if (++treeBandTick >= bandEvery) {
+            // Yield this frame if the static layer already rebuilt (heavy). The band
+            // is at most one frame staler — invisible at the slow sway cadence — but
+            // two big rebuilds never share a frame, which kills the worst spikes.
+            if (!heavyJobThisFrame && ++treeBandTick >= bandEvery) {
                 treeBandTick = 0;
                 // Visible tree count is ~constant across resolutions (DPI scaling),
                 // so the band count is too — splitting into ~4 keeps each band's
@@ -4334,7 +4368,9 @@ function render() {
                 }
                 glowHalfCtx.clearRect(0, 0, hw, hh);
                 glowHalfCtx.save();
-                glowHalfCtx.filter = `blur(${(5.5 * glowAmt).toFixed(1)}px)`;
+                // Blur radius is the glow's biggest fill-rate cost; trim it under load
+                // (0.65×–1×). Subtly tighter glow only when frames are already dropping.
+                glowHalfCtx.filter = `blur(${(5.5 * glowAmt * (0.65 + 0.35 * perfQuality)).toFixed(1)}px)`;
                 glowHalfCtx.drawImage(glowCanvas, gx0, gy0, gw, gh, 0, 0, hw, hh);
                 glowHalfCtx.restore();
                 ctx.save();
@@ -4520,7 +4556,11 @@ function render() {
             ctx.beginPath();
             ctx.arc(px, py, p.size, 0, Math.PI * 2);
             ctx.fill();
-            if (p.size > 6 && p.swirl !== undefined) {           // billow lobe
+            // Billow lobe — the secondary smoke blob. Under load, draw it every other
+            // frame (per-particle phase so it's not a synchronized flicker) — halves
+            // smoke fill-rate and is imperceptible at speed.
+            if (p.size > 6 && p.swirl !== undefined
+                && (perfQuality > 0.55 || ((frame + (p.shade & 1)) & 1) === 0)) {  // billow lobe
                 ctx.globalAlpha = p.life * 0.09;
                 ctx.beginPath();
                 ctx.arc(px + Math.cos(p.swirl) * p.size * 0.55,
@@ -4827,6 +4867,18 @@ function loop() {
         if (dt > 0) avgFps = avgFps * 0.92 + (1000 / dt) * 0.08;
     }
     lastFrameMs = now;
+
+    // Governor: compare the smoothed frame time against the target (the FPS-cap
+    // interval, or 16.7ms for 60fps). ratio ≤ 1.08 → full quality; ≥ 1.5 → fully
+    // shed. Eased so detail changes are gradual and never oscillate. Only active
+    // after warm-up so a cold first second doesn't trigger a needless dip.
+    if (frame > 90) {
+        const targetMs = minFrameMs > 0 ? minFrameMs : 16.7;
+        const ratio = (1000 / Math.max(1, avgFps)) / targetMs;
+        let q = (1.5 - ratio) / 0.42;
+        q = q < 0 ? 0 : (q > 1 ? 1 : q);
+        perfQuality += (q - perfQuality) * 0.04;   // slow ease → stable, invisible
+    }
 
     const isActive =
         burningCount > 0 ||
