@@ -400,6 +400,12 @@ let treeLayerCanvas = null, treeLayerCtx = null, treeLayerCountdown = 0;
 let treeLayerCamX = 0, treeLayerCamY = 0;       // camera pos at last FULL rebuild (jump guard)
 let treeBandPhase = 0, treeBandTick = 0;        // amortized rebuild: which band, cadence counter
 let treeContentDirty = 0;                       // frames of fast banded refresh after a tree changed
+let lastTreeBandSec = 0;                         // wall-clock time of the last band rebuild
+// Cap the canopy band-rebuild RATE by real time, not frame count, so a 144/240Hz
+// monitor refreshes (and pays for) the tree layer at the same pace as a 60Hz one —
+// the slow sway doesn't change between high-FPS frames anyway. Fast ≈ 60 bands/s.
+const TREE_BAND_FAST_SEC = 0.015;
+const TREE_BAND_SLOW_SEC = 0.1;
 let treePrevCamX = 0, treePrevCamY = 0;         // camera last frame (motion detection)
 const treeSinTab = new Float32Array(TREE_SWAY_SLOTS);  // per-rebuild sway offsets (treeVar × i&31)
 // Per-combo sway VARIATION so trees don't all sway in lock-step: each (treeVar,
@@ -4091,13 +4097,18 @@ function render() {
         const wcw = Math.min(cols - wx0, Math.ceil(vw / cell) + 1);
         const wch = Math.min(rows - wy0, Math.ceil(vh / cell) + 1);
         const sparkN = (14 + 22 * perfQuality) | 0;   // 36 at full quality → 14 under load
+        // Positions come from a ~22 Hz TIME bucket, not per-frame Math.random, so the
+        // shimmer looks identical at 60 / 144 / 240 Hz (instead of twinkling faster the
+        // higher the refresh) and reads as a gentle shimmer, not per-frame noise.
+        const sBucket = (renderTimeSec * 22) | 0;
         for (let k = 0; k < sparkN; k++) {
-            const x = wx0 + ((Math.random() * wcw) | 0);
-            const y = wy0 + ((Math.random() * wch) | 0);
+            const sd = (sBucket * 1597 + k * 51749) >>> 0;
+            const x = wx0 + ((hash01(sd, 1) * wcw) | 0);
+            const y = wy0 + ((hash01(sd, 2) * wch) | 0);
             const i = y * cols + x;
             if (grid[i] !== WATER) continue;
-            const sx = x * cell + ((Math.random() * cell) | 0);
-            const sy = y * cell + ((Math.random() * cell) | 0);
+            const sx = x * cell + ((hash01(sd, 3) * cell) | 0);
+            const sy = y * cell + ((hash01(sd, 4) * cell) | 0);
             // Brighter sparkle where sine band peaks
             const phase = (sx * 0.018 + sy * 0.013 + bandPhase);
             const b = Math.sin(phase) * 0.5 + 0.5; // 0..1
@@ -4443,22 +4454,24 @@ function render() {
             tlc.clearRect(0, 0, worldPxW, worldPxH);
             treeLayerCamX = camX; treeLayerCamY = camY;
             drawRows(cy0, cy1);
-            treeBandPhase = 0; treeBandTick = 0;
+            treeBandPhase = 0; treeBandTick = 0; lastTreeBandSec = renderTimeSec;
             treeLayerCountdown = 100000;        // banded refresh + guards maintain it from here
         } else {
             // AMORTIZED: refresh ONE horizontal band, spreading the rebuild cost
             // across frames so there's no periodic spike. Faster cadence while the
             // canopy sways or the camera moves; slow trickle when calm (for growth).
             const moving = (Math.abs(camX - treePrevCamX) + Math.abs(camY - treePrevCamY)) > 0.5;
-            // Fast (1 band/frame) while swaying, panning, or a tree recently changed
-            // (burn/sprout) so the canopy stays current without a full-rebuild spike.
-            const bandEvery = (swaying || moving || treeContentDirty > 0) ? 1 : 6;
+            // Fast cadence while swaying, panning, or a tree recently changed
+            // (burn/sprout); slow trickle when calm (for growth). The cap is by
+            // WALL-CLOCK TIME so the canopy refreshes at the same rate (~60 bands/s
+            // fast) regardless of monitor refresh — a 144/240Hz display doesn't pay
+            // 2-4× for the tree layer for sway it can't even perceive between frames.
+            const bandInterval = (swaying || moving || treeContentDirty > 0) ? TREE_BAND_FAST_SEC : TREE_BAND_SLOW_SEC;
             if (treeContentDirty > 0) treeContentDirty--;
-            // Yield this frame if the static layer already rebuilt (heavy). The band
-            // is at most one frame staler — invisible at the slow sway cadence — but
-            // two big rebuilds never share a frame, which kills the worst spikes.
-            if (!heavyJobThisFrame && ++treeBandTick >= bandEvery) {
-                treeBandTick = 0;
+            // Yield this frame if the static layer already rebuilt (heavy) so the two
+            // big rebuilds never share a frame, which kills the worst spikes.
+            if (!heavyJobThisFrame && (renderTimeSec - lastTreeBandSec) >= bandInterval) {
+                lastTreeBandSec = renderTimeSec;
                 // Visible tree count is ~constant across resolutions (DPI scaling),
                 // so the band count is too — splitting into ~4 keeps each band's
                 // rebuild cheap. Quality tier can spread it wider (slower sway).
