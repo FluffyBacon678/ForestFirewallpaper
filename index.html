@@ -4695,7 +4695,8 @@ function render() {
             else if (kind === 3) { hMul = 3.1; wMul = 0.9; taper = 0.78; curlMul = 2.2; } // curly licker
             if (p.flare) { hMul *= 1.5; }
             const tongueH = p.size * hMul;
-            const flick = 0.72 + 0.28 * Math.sin(p.phase);
+            // Calmer brightness pulse (p.phase advances ~4.8Hz; halving it → ~2.4Hz)
+            const flick = 0.78 + 0.22 * Math.sin(p.phase * 0.5);
             for (let sgi = 0; sgi < SEGS; sgi++) {
                 const t = sgi / (SEGS - 1);                 // 0 base → 1 tip
                 const segY = py - tongueH * t;
@@ -4742,9 +4743,12 @@ function render() {
         for (const p of sparks) {
             const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
-            // Gentle twinkle — ~1.3 Hz (well under the flicker/epilepsy threshold),
-            // shallow depth, per-spark phase via px so they're not in lock-step.
-            const tw = 0.7 + 0.3 * Math.sin(renderTimeSec * 8 + px);
+            // Gentle twinkle — ~1.1 Hz, shallow depth, with a STABLE per-spark phase.
+            // (Using the moving screen position px as the phase made fast-arcing
+            // sparks strobe, since px jumps several px/frame — that read as flicker
+            // at the spreading front when a fire starts.)
+            if (p.ph === undefined) p.ph = Math.random() * 6.2831853;
+            const tw = 0.74 + 0.26 * Math.sin(renderTimeSec * 7 + p.ph);
             ctx.fillStyle = rgbQ(255, (220 + a * 35) | 0, (140 * a) | 0);
             ctx.globalAlpha = a * tw;
             ctx.beginPath();
