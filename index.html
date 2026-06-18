@@ -3267,19 +3267,29 @@ function update(dt = SIM_DT) {
                     const ns = grid[idx(nx, ny)];
                     if (ns === TREE || ns === BURN_TREE) treeNeighbors++;
                 }
-                // Near woodland: saplings take readily. Out in the open: rarely.
-                const take = treeNeighbors > 0 ? 0.80 : 0.06;
+                // Pick the species first: pioneer conifers (pine/fir) colonise OPEN
+                // burned ground far more readily than the rest, so a fresh scar fills
+                // back in with young evergreens first and the slower broadleaves follow
+                // later (real post-fire succession). Near existing woodland everything
+                // takes readily regardless of species.
+                const variant = pickTreeVariant();
+                const psp = (variant >> 1) & 15;
+                const pioneer = (psp === SPECIES_PINE || psp === SPECIES_FIR);
+                const take = treeNeighbors > 0 ? 0.80 : (pioneer ? 0.22 : 0.05);
                 if (Math.random() < take) {
                     grid[i] = TREE;
-                    treeVar[i] = pickTreeVariant();
+                    treeVar[i] = variant;
                     treeGrowth[i] = 0.12 + Math.random() * 0.08; // starts as a sapling
                     treeContentDirty = 12;   // new sapling → fast banded refresh
                     // grass tuft already baked under the new tree — no terrain edit needed
                 }
             }
         } else if (s === TREE && treeGrowth[i] < 1) {
-            // Saplings mature into full trees over ~1–2 minutes
-            treeGrowth[i] = Math.min(1, treeGrowth[i] + 0.00045 * Math.max(0.4, props.regrowthRate) * sdt);
+            // Saplings mature into full trees over ~1–2 minutes; the pioneer conifers
+            // (pine/fir) put on size a bit quicker so the green canopy fills back first.
+            const gsp = (treeVar[i] >> 1) & 15;
+            const fast = (gsp === SPECIES_PINE || gsp === SPECIES_FIR) ? 1.5 : 1;
+            treeGrowth[i] = Math.min(1, treeGrowth[i] + 0.00045 * fast * Math.max(0.4, props.regrowthRate) * sdt);
         }
     }
 
