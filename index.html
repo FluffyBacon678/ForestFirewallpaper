@@ -872,7 +872,7 @@ function drawFirSide(c, cx, baseY, w, h, sizeIdx) {
     drawGroundShadow(c, cx, baseY, w * 0.30);
     drawTrunkSide(c, cx, baseY, trunkW, trunkH, false);
 
-    const dark = "#143f20", mid = "#216a31", lite = "#3a9648";   // cooler/bluer than the pine
+    const dark = "#143f20", mid = "#236d33", lite = "#3f9a4c", hi = "#63bd6a"; // cooler green + highlight
     const topY = baseY - h * 0.96;
     const botY = baseY - trunkH * 0.5;
     const tiers = 4 + sizeIdx;
@@ -882,33 +882,25 @@ function drawFirSide(c, cx, baseY, w, h, sizeIdx) {
         const ty = topY + t * tierH;
         const tw = w * (0.14 + (t / tiers) * 0.42);   // wider toward the bottom
         const lobes = 2 + t;                           // more rounded lobes lower down
-        const lobeR = (tw / Math.max(1, lobes)) * 1.25;
+        const lobeR = (tw / Math.max(1, lobes)) * 1.30;
         const by = ty + tierH * 1.0;                   // tier baseline
-        // dark scalloped base — a row of overlapping circles → soft bumpy tier edge
+        // dark scalloped silhouette — a row of overlapping circles (rounded branch tips)
         c.fillStyle = dark;
         for (let l = 0; l <= lobes; l++) {
             const lx = cx - tw + (2 * tw) * (l / lobes);
             c.beginPath(); c.arc(lx, by, lobeR, 0, Math.PI * 2); c.fill();
         }
-        // mid fill — slightly raised + smaller
-        c.fillStyle = mid;
-        for (let l = 0; l <= lobes; l++) {
-            const lx = cx - tw * 0.82 + (1.64 * tw) * (l / lobes);
-            c.beginPath(); c.arc(lx, by - tierH * 0.20, lobeR * 0.80, 0, Math.PI * 2); c.fill();
-        }
-        // lit highlights on the upper-left lobes
-        c.fillStyle = lite;
-        const hn = Math.max(1, lobes - 1);
-        for (let l = 0; l <= hn; l++) {
-            const lx = cx - tw * 0.68 + (tw * 0.85) * (l / hn);
-            c.beginPath(); c.arc(lx, by - tierH * 0.34, lobeR * 0.48, 0, Math.PI * 2); c.fill();
-        }
+        // dappled foliage texture over the tier, lit toward the upper-left
+        const fcy = by - tierH * 0.30;
+        leafCluster(c, cx, fcy, tw * 0.95, tierH * 0.62, mid, 9 + t * 3, 0.98);              // mid fill
+        leafCluster(c, cx - tw * 0.34, fcy - tierH * 0.16, tw * 0.55, tierH * 0.48, lite, 5 + t * 2, 0.9); // lit
+        leafCluster(c, cx - tw * 0.44, fcy - tierH * 0.22, tw * 0.30, tierH * 0.30, hi, 2 + t, 0.85);      // highlight
+        leafCluster(c, cx + tw * 0.42, by - tierH * 0.06, tw * 0.30, tierH * 0.30, dark, 3 + t, 0.7);      // shadow pocket (low-right)
     }
-    // soft rounded crown
-    c.fillStyle = mid;
-    c.beginPath(); c.arc(cx, topY + tierH * 0.25, Math.max(1.5, w * 0.09), 0, Math.PI * 2); c.fill();
-    c.fillStyle = lite;
-    c.fillRect((cx - 0.5) | 0, topY | 0, 1, 2);
+    // dappled crown tuft
+    leafCluster(c, cx, topY + tierH * 0.32, w * 0.12, tierH * 0.5, mid, 6, 0.95);
+    leafCluster(c, cx - w * 0.04, topY + tierH * 0.22, w * 0.07, tierH * 0.34, lite, 3, 0.85);
+    c.fillStyle = hi; c.fillRect((cx - 0.5) | 0, topY | 0, 1, 2);
 }
 
 // Poplar: tall, NARROW columnar broadleaf — stacked vertical leaf clusters that
@@ -917,22 +909,24 @@ function drawPoplarSide(c, cx, baseY, w, h, sizeIdx) {
     const trunkH = h * 0.16, trunkW = Math.max(2, w * 0.09);
     drawGroundShadow(c, cx, baseY, w * 0.18);
     drawTrunkSide(c, cx, baseY, trunkW, trunkH, false);
-    const dark = "#27501b", mid = "#3b7c2b", lite = "#5aa540", hi = "#84c462";
-    const cw = w * 0.26;                              // narrow column
+    const dark = "#244e19", mid = "#3a7c2a", lite = "#5cab42", hi = "#88c863";
+    const cw = w * 0.27;                              // narrow column
     const topY = baseY - h * 0.99;
     const botY = baseY - trunkH * 0.55;
     const colH = botY - topY;
-    const segs = 4 + sizeIdx;
+    const segs = 5 + sizeIdx;
     for (let s = 0; s < segs; s++) {
         const f = s / (segs - 1);                    // 0 top → 1 bottom
-        const cy = topY + colH * (0.10 + f * 0.82);
-        const rx = cw * (0.34 + f * 0.78);           // narrow up top, wider low
-        const ry = colH * 0.19;
-        leafCluster(c, cx, cy, rx, ry, dark, 16, 1.0);
-        leafCluster(c, cx, cy - ry * 0.12, rx * 0.82, ry * 0.85, mid, 14, 0.92);
-        leafCluster(c, cx - rx * 0.3, cy - ry * 0.25, rx * 0.5, ry * 0.46, lite, 8, 0.88);
+        const cy = topY + colH * (0.08 + f * 0.84);
+        const rx = cw * (0.32 + f * 0.82);           // narrow up top, wider low
+        const ry = colH * 0.17;
+        leafCluster(c, cx, cy, rx, ry, dark, 16, 1.0);                            // silhouette
+        leafCluster(c, cx, cy - ry * 0.10, rx * 0.86, ry * 0.90, mid, 16, 0.95);  // mid fill
+        leafCluster(c, cx - rx * 0.34, cy - ry * 0.28, rx * 0.50, ry * 0.55, lite, 9, 0.9);  // lit (upper-left)
+        leafCluster(c, cx - rx * 0.44, cy - ry * 0.34, rx * 0.28, ry * 0.32, hi, 4, 0.85);   // highlight
+        leafCluster(c, cx + rx * 0.34, cy + ry * 0.20, rx * 0.30, ry * 0.34, dark, 4, 0.7);  // shadow (lower-right)
     }
-    leafCluster(c, cx - cw * 0.18, topY + colH * 0.22, cw * 0.4, colH * 0.16, hi, 6, 0.8);
+    leafCluster(c, cx - cw * 0.12, topY + colH * 0.16, cw * 0.36, colH * 0.14, hi, 5, 0.8);  // bright crown tip
 }
 
 // Willow: rounded crown + long DROOPING fronds that drape from its underside
@@ -941,27 +935,40 @@ function drawWillowSide(c, cx, baseY, w, h, sizeIdx) {
     const trunkH = h * 0.24, trunkW = Math.max(2, w * 0.12);
     drawGroundShadow(c, cx, baseY, w * 0.34);
     drawTrunkSide(c, cx, baseY, trunkW, trunkH, false);
-    const dark = "#3a5e22", mid = "#5d8a36", lite = "#88b85a", hi = "#b0d27f";
-    const canRx = w * (0.42 + sizeIdx * 0.03);
-    const canRy = h * 0.20;
-    const canCy = baseY - trunkH - canRy * 0.6;
-    leafCluster(c, cx, canCy, canRx, canRy, dark, 26, 1.0);
-    leafCluster(c, cx, canCy - canRy * 0.1, canRx * 0.9, canRy * 0.85, mid, 24, 0.92);
-    leafCluster(c, cx - canRx * 0.25, canCy - canRy * 0.22, canRx * 0.55, canRy * 0.5, lite, 14, 0.88);
-    leafCluster(c, cx - canRx * 0.3, canCy - canRy * 0.28, canRx * 0.32, canRy * 0.3, hi, 6, 0.82);
-    c.lineWidth = Math.max(1, w * 0.024); c.lineCap = "round";   // fine tendrils
-    const fronds = 12 + sizeIdx * 3;                              // many → soft cascade
-    const sy = canCy + canRy * 0.45;
-    for (let i = 0; i <= fronds; i++) {
-        const fx = cx - canRx * 0.92 + (canRx * 1.84) * (i / fronds);
-        const mid01 = 1 - Math.abs(fx - cx) / (canRx * 0.92);    // 1 centre → 0 edge (longest mid)
-        const droop = canRy * 0.5 + (0.4 + 0.6 * mid01) * h * 0.40 + Math.random() * h * 0.05;
-        const sway = (Math.random() - 0.5) * w * 0.12;           // gentle per-frond wander
-        c.strokeStyle = (i % 3 === 0) ? lite : mid;
-        c.beginPath();
-        c.moveTo(fx, sy);
-        c.quadraticCurveTo(fx + sway, sy + droop * 0.5, fx + sway * 0.6, sy + droop);
-        c.stroke();
+    const dark = "#33571f", mid = "#588534", lite = "#86b657", hi = "#aed079";
+    const canRx = w * (0.46 + sizeIdx * 0.03);
+    const canRy = h * 0.15;
+    const canCy = baseY - h * 0.72;              // crown high → room for the curtain to drape
+    // full dappled dome crown, lit toward the upper-left
+    leafCluster(c, cx, canCy, canRx, canRy, dark, 30, 1.0);
+    leafCluster(c, cx, canCy - canRy * 0.10, canRx * 0.92, canRy * 0.88, mid, 28, 0.96);
+    leafCluster(c, cx, canCy + canRy * 0.55, canRx * 0.86, canRy * 0.70, mid, 16, 1.0);   // fuller underside
+    leafCluster(c, cx - canRx * 0.26, canCy - canRy * 0.22, canRx * 0.55, canRy * 0.52, lite, 16, 0.9);
+    leafCluster(c, cx - canRx * 0.34, canCy - canRy * 0.30, canRx * 0.30, canRy * 0.32, hi, 7, 0.85);
+    // WEEPING skirt — a continuous draping curtain whose RAGGED bottom edge (each
+    // tendril a different length, longest in the middle) gives the weep; the left
+    // strands catch the light. Dense enough to read full, varied enough to weep.
+    const br = Math.max(1, w * 0.05);
+    const sy = canCy + canRy * 0.85;             // start at the crown's underside
+    const bottom = baseY - trunkH * 0.25;        // drape to just above the trunk base
+    const span = canRx * 1.7;
+    const nt = Math.max(8, Math.round(span / (br * 1.2)));
+    for (let i = 0; i <= nt; i++) {
+        const fx = cx - span / 2 + span * (i / nt) + (Math.random() - 0.5) * br;
+        const mid01 = 1 - Math.abs(fx - cx) / (span * 0.55);    // 1 centre → 0 edge
+        const len = (0.30 + 0.70 * Math.max(0, mid01)) * (bottom - sy) * (0.70 + Math.random() * 0.6);
+        const leftLit = fx < cx;
+        let wob = 0;
+        const step = br * 1.15;
+        for (let d = 0; d < len; d += step) {
+            const t = d / len;
+            wob += (Math.random() - 0.5) * br * 0.6;
+            if (wob >  w * 0.05) wob =  w * 0.05;
+            if (wob < -w * 0.05) wob = -w * 0.05;
+            const rnd = Math.random();
+            c.fillStyle = (leftLit && rnd < 0.5) ? lite : (rnd < 0.8 ? mid : dark);
+            c.beginPath(); c.arc(fx + wob, sy + d, br * (1 - t * 0.4), 0, Math.PI * 2); c.fill();
+        }
     }
 }
 
