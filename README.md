@@ -54,12 +54,14 @@ Features:
   slider.
 - **Lush green jungle floor** — a mossy green ground (not bare brown dirt) carpeted
   in dense green growth, for a verdant, almost-jungle look
-- **54 ground-cover types** baked into the grass atlas: ten lush-grass variations,
+- **59 ground-cover types** baked into the grass atlas: ten lush-grass variations,
   tall grass, **wispy seed-head bent-grass**, dry grass, six wildflower colours,
   **true-blue cornflowers**, **tall purple lupine spikes**, **drooping violet
-  bell-flowers**, **red-cap toadstools**, **tall sunflowers**, **magenta heather**,
-  **reedy cattails**, **fallen mossy logs** and **old tree stumps** (woody forest
-  structure), clover, ferns, shrubs, dandelion
+  bell-flowers**, **red-cap toadstools** and **brown forest mushrooms**, **tall
+  sunflowers**, **yellow daffodils**, **magenta heather**, **pink foxglove spikes**,
+  **reedy cattails**, **wild strawberries**, **moss-capped boulders**, **fallen
+  mossy logs** and **old tree stumps** (woody forest structure), clover, ferns,
+  shrubs, dandelion
   puffs, spotted mushrooms, berry bushes, flower patches, lavender, tulips,
   pampas-grass plumes, reeds/cattails, **glowing bioluminescent mushrooms**,
   **jungle plants** (broadleaf clumps, big jungle ferns, elephant-ear leaves), and
