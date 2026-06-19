@@ -256,7 +256,7 @@ const TREE_SWAY_SLOTS    = TREE_NUM_VARIANTS * 32;  // sway tables: (treeVar << 
 //   28 flower patch  29 lavender  30 tulips  31 pampas grass  32 reeds  33 glowing mushrooms
 //   34-36 jungle broadleaf / fern / elephant-ear
 //   37 daisies  38 poppies  39 fireweed  40 buttercups  41 pebbles  42 leaf litter  43 wildflower meadow
-const GRASS_NUM_VARIANTS = 48;
+const GRASS_NUM_VARIANTS = 54;
 const GRASS_GLOWMUSH = 33;   // variant index whose cells emit a soft pulsing glow
 // Flower / clutter variants used to bias post-fire regrowth into a bloom meadow
 const GRASS_DAISY = 37, GRASS_POPPY = 38, GRASS_FIREWEED = 39,
@@ -265,6 +265,12 @@ const GRASS_CORNFLOWER = 44; // NEW — true-blue cornflowers (the one missing f
 const GRASS_BENT = 45;       // NEW — wispy seed-headed bent-grass (airy tall-grass texture)
 const GRASS_LUPINE = 46;     // NEW — tall purple/blue flower SPIKES (vertical shape)
 const GRASS_BELL = 47;       // NEW — drooping violet bell-flowers (hanging shape)
+const GRASS_TOADSTOOL = 48;  // NEW — red-cap white-spot toadstools (Amanita)
+const GRASS_LOG = 49;        // NEW — fallen mossy log (forest-floor structure)
+const GRASS_STUMP = 50;      // NEW — old cut tree stump with rings
+const GRASS_SUNFLOWER = 51;  // NEW — tall yellow sunflowers
+const GRASS_HEATHER = 52;    // NEW — low magenta/purple heather shrubs
+const GRASS_CATTAIL = 53;    // NEW — tall reedy cattails with a brown spike
 const TREE_TINTS = [
     { r: 32, g: 78,  b: 24 },  // darker green
     { r: 50, g: 105, b: 32 },  // brighter green
@@ -1126,6 +1132,12 @@ function renderGrassTopDown(c, ox, oy, w, h, variant) {
     else if (variant === GRASS_BENT)       drawBentGrass(c, ox, oy, w, h);
     else if (variant === GRASS_LUPINE)     drawLupines(c, ox, oy, w, h);
     else if (variant === GRASS_BELL)       drawBellflowers(c, ox, oy, w, h);
+    else if (variant === GRASS_TOADSTOOL)  drawToadstools(c, ox, oy, w, h);
+    else if (variant === GRASS_LOG)        drawFallenLog(c, ox, oy, w, h);
+    else if (variant === GRASS_STUMP)      drawStump(c, ox, oy, w, h);
+    else if (variant === GRASS_SUNFLOWER)  drawSunflowers(c, ox, oy, w, h);
+    else if (variant === GRASS_HEATHER)    drawHeather(c, ox, oy, w, h);
+    else if (variant === GRASS_CATTAIL)    drawCattails(c, ox, oy, w, h);
     else                     drawWildflowerMeadow(c, ox, oy, w, h);   // 43 + fallback
 }
 
@@ -1680,6 +1692,120 @@ function drawBellflowers(c, ox, oy, w, h) {
     }
 }
 
+// --- Toadstools: iconic red-cap, white-spotted mushrooms on pale stems ---
+function drawToadstools(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 4);
+    const n = 2 + (Math.random() * 3 | 0);
+    for (let i = 0; i < n; i++) {
+        const cx = ox + 2 + Math.random() * (w - 4);
+        const base = oy + h - 1 - Math.random() * (h * 0.15);
+        const ch = Math.max(3, h * (0.18 + Math.random() * 0.14));   // stem height
+        const cr = Math.max(1.5, w * (0.10 + Math.random() * 0.05));  // cap radius
+        c.fillStyle = "rgba(0,0,0,0.22)";
+        c.beginPath(); c.ellipse(cx, base, cr * 0.9, cr * 0.4, 0, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(238,232,214,0.95)";                       // pale stem
+        c.fillRect((cx - cr * 0.25) | 0, (base - ch) | 0, Math.max(1, (cr * 0.5) | 0), ch | 0);
+        c.fillStyle = "rgba(196,40,32,0.97)";                         // red cap dome
+        c.beginPath(); c.ellipse(cx, base - ch, cr, cr * 0.62, 0, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(232,96,74,0.85)";                         // lit top-left
+        c.beginPath(); c.ellipse(cx - cr * 0.3, base - ch - cr * 0.18, cr * 0.4, cr * 0.26, 0, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(246,240,226,0.92)";                       // white spots
+        for (let s = 0; s < 3; s++)
+            c.fillRect((cx + (Math.random() - 0.5) * cr * 1.4) | 0, (base - ch + (Math.random() - 0.5) * cr * 0.7) | 0, 1, 1);
+    }
+}
+
+// --- Fallen log: a mossy horizontal log with end-grain rings (forest structure) ---
+function drawFallenLog(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 6);
+    const ly = oy + h * 0.5 + Math.random() * h * 0.22;
+    const lx0 = ox + w * 0.08, lw = w * 0.84, lh = Math.max(2, h * 0.16);
+    c.fillStyle = "rgba(0,0,0,0.2)";
+    c.fillRect(lx0 | 0, (ly + lh * 0.7) | 0, lw | 0, Math.max(1, (lh * 0.5) | 0));
+    c.fillStyle = "#6b4a2c";                                          // log body
+    c.fillRect(lx0 | 0, ly | 0, lw | 0, lh | 0);
+    c.fillStyle = "rgba(40,26,14,0.5)";                              // underside shade
+    c.fillRect(lx0 | 0, (ly + lh * 0.6) | 0, lw | 0, Math.max(1, (lh * 0.4) | 0));
+    c.fillStyle = "#8a6038";                                          // end-grain
+    c.beginPath(); c.ellipse(lx0, ly + lh * 0.5, lh * 0.55, lh * 0.55, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = "#5b3d22";
+    c.beginPath(); c.ellipse(lx0, ly + lh * 0.5, lh * 0.28, lh * 0.28, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = "rgba(72,124,52,0.85)";                            // moss on top
+    const moss = Math.max(3, (lw * 0.22) | 0);
+    for (let m = 0; m < moss; m++)
+        c.fillRect((lx0 + Math.random() * lw) | 0, (ly - Math.random() * 1.6) | 0, 1 + (Math.random() < 0.35 ? 1 : 0), 1);
+}
+
+// --- Tree stump: a low cut stump with growth rings + a hopeful sprout ---
+function drawStump(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 5);
+    const cx = ox + w * 0.5, base = oy + h - 2;
+    const sh = Math.max(3, h * 0.22), sr = Math.max(2, w * 0.22);
+    c.fillStyle = "rgba(0,0,0,0.22)";
+    c.beginPath(); c.ellipse(cx, base, sr * 1.1, sr * 0.4, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = "#5b3d22";
+    c.fillRect((cx - sr) | 0, (base - sh) | 0, (sr * 2) | 0, sh | 0);  // trunk side
+    c.fillStyle = "rgba(40,26,14,0.4)";
+    c.fillRect(cx | 0, (base - sh) | 0, sr | 0, sh | 0);              // shaded right
+    c.fillStyle = "#8a6038";
+    c.beginPath(); c.ellipse(cx, base - sh, sr, sr * 0.5, 0, 0, Math.PI * 2); c.fill();  // cut top
+    c.strokeStyle = "rgba(91,61,34,0.7)"; c.lineWidth = 1;
+    for (let ring = 1; ring <= 2; ring++) {
+        c.beginPath(); c.ellipse(cx, base - sh, sr * (ring / 3), sr * 0.5 * (ring / 3), 0, 0, Math.PI * 2); c.stroke();
+    }
+    c.fillStyle = "rgba(70,130,55,0.9)";
+    c.fillRect((cx - 1) | 0, (base - sh - 3) | 0, 1, 3);              // sprout
+}
+
+// --- Sunflowers: tall stems topped with a big yellow flower + dark centre ---
+function drawSunflowers(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 0);
+    const n = 1 + (Math.random() * 2 | 0);
+    for (let i = 0; i < n; i++) {
+        const bx = ox + 3 + Math.random() * (w - 6), by = oy + h - 1;
+        const sh = Math.max(5, h * (0.6 + Math.random() * 0.3));
+        c.fillStyle = "rgba(58,108,44,0.9)"; c.fillRect(bx | 0, (by - sh) | 0, 1, sh | 0);  // stem
+        c.fillStyle = "rgba(70,130,50,0.85)"; c.fillRect((bx - 2) | 0, (by - sh * 0.5) | 0, 2, 1); // leaf
+        const fx = bx, fy = by - sh, fr = Math.max(1.5, w * 0.10);
+        c.fillStyle = "rgba(244,196,40,0.97)";                       // petals
+        for (let p = 0; p < 8; p++)
+            c.fillRect((fx + Math.cos(p / 8 * 6.2831853) * fr) | 0, (fy + Math.sin(p / 8 * 6.2831853) * fr) | 0, 1, 1);
+        c.beginPath(); c.arc(fx, fy, fr * 0.7, 0, Math.PI * 2); c.fill();
+        c.fillStyle = "rgba(82,52,22,0.95)";                         // dark seed centre
+        c.beginPath(); c.arc(fx, fy, fr * 0.4, 0, Math.PI * 2); c.fill();
+    }
+}
+
+// --- Heather: a low clump of stems tipped with tiny magenta/violet bells ---
+function drawHeather(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 2);
+    const n = 5 + (Math.random() * 5 | 0);
+    for (let i = 0; i < n; i++) {
+        const bx = ox + 2 + Math.random() * (w - 4), by = oy + h - 1 - Math.random() * 2;
+        const sh = Math.max(2, h * (0.2 + Math.random() * 0.18));
+        c.fillStyle = "rgba(70,110,55,0.7)"; c.fillRect(bx | 0, (by - sh) | 0, 1, sh | 0);
+        c.fillStyle = Math.random() < 0.5 ? "rgba(190,80,150,0.92)" : "rgba(150,70,170,0.92)";
+        for (let s = 0; s < sh; s += 1.5)
+            c.fillRect((bx + (Math.random() < 0.5 ? -1 : 0)) | 0, (by - s) | 0, 1, 1);
+    }
+}
+
+// --- Cattails: tall reedy stems each with a brown sausage spike (damp ground) ---
+function drawCattails(c, ox, oy, w, h) {
+    drawLushGrass(c, ox, oy, w, h, 1);
+    const n = 3 + (Math.random() * 3 | 0);
+    for (let i = 0; i < n; i++) {
+        const bx = ox + 2 + Math.random() * (w - 4), by = oy + h - 1;
+        const sh = Math.max(5, h * (0.6 + Math.random() * 0.35));
+        c.fillStyle = "rgba(58,118,52,0.9)"; c.fillRect(bx | 0, (by - sh) | 0, 1, sh | 0);  // tall stem
+        const spY = by - sh * 0.78, spH = Math.max(2, sh * 0.22);
+        c.fillStyle = "rgba(110,70,36,0.96)";                        // brown spike
+        c.fillRect((bx - 0.5) | 0, spY | 0, Math.max(1, (w * 0.05) | 0) + 1, spH | 0);
+        c.fillStyle = "rgba(142,98,56,0.8)"; c.fillRect(bx | 0, spY | 0, 1, 1);             // lit
+        c.fillStyle = "rgba(70,132,60,0.85)"; c.fillRect(bx | 0, (by - sh - 1) | 0, 1, 2);  // tip
+    }
+}
+
 // --- Pebbles: small grey/tan stones (ground clutter, not a plant) ---
 function drawPebbles(c, ox, oy, w, h) {
     drawLushGrass(c, ox, oy, w, h, 3);
@@ -1747,31 +1873,38 @@ function pickGrassVariant() {
     if (r < 0.53) return GRASS_BENT;                      // 45 wispy seed-head bent-grass
     if (r < 0.59) return 34 + (Math.random() * 3 | 0);    // 34-36 jungle plants (broadleaf/fern/ear)
     if (r < 0.62) return 13 + (Math.random() * 3 | 0);    // 13-15 dry grass (rarer in a jungle)
-    if (r < 0.70) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
-    if (r < 0.725) return GRASS_CORNFLOWER;               // 44 true-blue cornflowers
-    if (r < 0.745) return GRASS_LUPINE;                   // 46 tall purple flower spikes
-    if (r < 0.765) return GRASS_BELL;                     // 47 drooping violet bells
-    // --- richer flower / clutter band ---
-    if (r < 0.735) return GRASS_DAISY;        // 37 daisies
-    if (r < 0.765) return GRASS_BUTTERCUP;    // 40 buttercups
-    if (r < 0.795) return GRASS_POPPY;        // 38 poppies
-    if (r < 0.82)  return GRASS_MEADOW;       // 43 dense wildflower meadow
-    if (r < 0.84)  return GRASS_FIREWEED;     // 39 fireweed spikes
-    if (r < 0.865) return GRASS_LITTER;       // 42 leaf litter (clutter)
-    if (r < 0.885) return GRASS_PEBBLES;      // 41 pebbles (clutter)
+    if (r < 0.69) return 16 + (Math.random() * 6 | 0);    // 16-21 wildflowers
+    // --- flower band (monotonic thresholds) ---
+    if (r < 0.705) return GRASS_CORNFLOWER;   // 44 true-blue cornflowers
+    if (r < 0.718) return GRASS_LUPINE;       // 46 tall purple flower spikes
+    if (r < 0.731) return GRASS_BELL;         // 47 drooping violet bells
+    if (r < 0.748) return GRASS_DAISY;        // 37 daisies
+    if (r < 0.764) return GRASS_BUTTERCUP;    // 40 buttercups
+    if (r < 0.787) return GRASS_POPPY;        // 38 poppies
+    if (r < 0.805) return GRASS_MEADOW;       // 43 dense wildflower meadow
+    if (r < 0.818) return GRASS_FIREWEED;     // 39 fireweed spikes
+    if (r < 0.831) return GRASS_HEATHER;      // 52 NEW magenta heather
+    if (r < 0.843) return GRASS_SUNFLOWER;    // 51 NEW tall sunflowers
+    if (r < 0.855) return GRASS_CATTAIL;      // 53 NEW reedy cattails
+    // --- clutter / structure band ---
+    if (r < 0.871) return GRASS_TOADSTOOL;    // 48 NEW red toadstools
+    if (r < 0.886) return GRASS_LITTER;       // 42 leaf litter
+    if (r < 0.900) return GRASS_PEBBLES;      // 41 pebbles
+    if (r < 0.911) return GRASS_LOG;          // 49 NEW fallen mossy log
+    if (r < 0.921) return GRASS_STUMP;        // 50 NEW tree stump
     // --- existing specials ---
-    if (r < 0.905) return 23;   // fern
-    if (r < 0.92)  return 28;   // flower patch
-    if (r < 0.93)  return 29;   // lavender
-    if (r < 0.942) return 30;   // tulips
-    if (r < 0.952) return 31;   // pampas grass
-    if (r < 0.962) return 32;   // reeds
-    if (r < 0.972) return 22;   // clover
-    if (r < 0.98)  return 24;   // shrub
-    if (r < 0.987) return 25;   // dandelion
-    if (r < 0.992) return 26;   // mushrooms
-    if (r < 0.998) return 27;   // berry bush
-    return GRASS_GLOWMUSH;      // glowing mushrooms (~0.2%)
+    if (r < 0.937) return 23;   // fern
+    if (r < 0.949) return 28;   // flower patch
+    if (r < 0.958) return 29;   // lavender
+    if (r < 0.967) return 30;   // tulips
+    if (r < 0.974) return 31;   // pampas grass
+    if (r < 0.981) return 32;   // reeds
+    if (r < 0.987) return 22;   // clover
+    if (r < 0.991) return 24;   // shrub
+    if (r < 0.994) return 25;   // dandelion
+    if (r < 0.997) return 26;   // mushrooms
+    if (r < 0.999) return 27;   // berry bush
+    return GRASS_GLOWMUSH;      // glowing mushrooms (~0.1%)
 }
 
 // After a burn, ground regrows FLOWER-RICH: fireweed, poppies and meadows bloom
