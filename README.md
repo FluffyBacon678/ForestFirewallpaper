@@ -159,6 +159,12 @@ Features:
 - **Scattered rain** — drops spawn in coherent patches within the advancing front,
   with a Wallpaper Engine slider for clean curtain rain vs broken rain cells
 - Rain extinguishes fires (with steam puffs); storms boost lightning frequency
+- **Natural fires are lightning strikes — only when it's raining.** Dry, clear and
+  cloudy skies start no fires on their own (no clear-sky lightning); rain throws the
+  occasional strike, monsoon more, storms the most. So left on its own the forest
+  stays calm and green, with the odd wildfire rolling in on a passing storm — you
+  start the rest yourself by clicking. (Toggle/rate under **Natural fires** in the WE
+  properties.)
 - Cloud shadows drift across ground (off by default — toggle in properties)
 - Bird flocks in V-formation that **steer around active fires**, each bird a
   gull-wing silhouette that **beats its wings** (droop → glide → upstroke)

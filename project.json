@@ -356,13 +356,13 @@
             },
             "autoIgnite": {
                 "order": 51,
-                "text":   "Auto-ignite (random sparks / storm lightning)",
+                "text":   "Natural fires (lightning — only when it's raining/storming)",
                 "type":   "bool",
                 "value":  true
             },
             "autoIgniteRate": {
                 "order": 52,
-                "text":   "Auto-ignite frequency",
+                "text":   "Natural-fire (lightning) frequency",
                 "type":   "slider",
                 "value":  1.0,
                 "min":    0.1,
