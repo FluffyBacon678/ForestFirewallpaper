@@ -2093,6 +2093,7 @@ function spawnFish() {
             speed: 0.18 + Math.random() * 0.28,
             size: cell * (0.22 + Math.random() * 0.18),
             wob: Math.random() * Math.PI * 2,         // tail-wag / wander phase
+            dart: 0,                                  // >0 = mid-dart (brief startled burst)
         });
     }
 }
@@ -2100,12 +2101,18 @@ function updateFish(dt) {
     if (!props.showFish || !fishList.length) return;
     for (const f of fishList) {
         rememberPos(f);
-        f.wob += 0.12 * dt;
+        // Occasional dart — fish hold a lazy cruise, then suddenly flick forward with
+        // a quick direction change, then ease back to cruising. Reads as living fish.
+        if (f.dart > 0) f.dart -= dt;
+        else if (Math.random() < 0.0016 * dt) { f.dart = 8 + Math.random() * 10; f.ang += (Math.random() - 0.5) * 1.2; }
+        const darting = f.dart > 0;
+        f.wob += (darting ? 0.45 : 0.12) * dt;        // tail wags faster mid-dart
         f.ang += Math.sin(f.wob * 0.3) * 0.05;        // gentle meander
-        const nx = f.x + Math.cos(f.ang) * f.speed * 2.2 * dt;
-        const ny = f.y + Math.sin(f.ang) * f.speed * 2.2 * dt;
+        const sp = f.speed * 2.2 * (darting ? 3.2 : 1.0);
+        const nx = f.x + Math.cos(f.ang) * sp * dt;
+        const ny = f.y + Math.sin(f.ang) * sp * dt;
         if (isWaterAt(nx, ny)) { f.x = nx; f.y = ny; }
-        else { f.ang += 1.9 + Math.random() * 0.8; }  // bounce off the shore
+        else { f.ang += 1.9 + Math.random() * 0.8; f.dart = 0; }  // shore → stop, turn
     }
 }
 
