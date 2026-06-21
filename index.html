@@ -339,7 +339,7 @@ let glowSpots = [];      // cell centres of glowing-mushroom cells (soft pulsing
 let fishList  = [];      // fish shadows swimming in water bodies
 let critters  = [];      // ground animals (deer/rabbits) that wander + flee fire
 let insects   = [];      // daytime butterflies / dragonflies
-let glowRefreshAt = 0;   // frame countdown to next glowSpots rescan
+let glowRefreshAt = 0;   // sim-time countdown to next glowSpots rescan (decremented by sim dt)
 let rainDrops = [];
 let rainSplash = [];     // little splash droplets bouncing up where the douse-rain lands
 let clouds = [];
@@ -465,10 +465,13 @@ let waterMaskBlurCtx = null;
 let terrainCanvas = null;
 let terrainCtx    = null;
 let terrainDirty  = true;
-let staticThrottle = 0;
+let lastStaticSec = 0;                      // wall-clock time of the last scar-layer rebuild
 let staticCamX = -1e9, staticCamY = -1e9;  // camera at last static rebuild (visible-region refresh)
 let staticForceFull = true;                // next rebuild does the whole world (worldgen/resize)
-const STATIC_REBUILD_MIN_GAP = 3; // re-bake at most every N frames even if dirty
+// Re-bake the scar layer at most this often (wall-clock, not frame count) so a
+// 144/240Hz monitor doesn't run the ~3ms rebuild several times more per second than
+// a 60Hz one. 0.05s ≈ the old 3-frame gap at 60fps, so 60fps behaviour is unchanged.
+const STATIC_REBUILD_MIN_SEC = 0.05;
 
 // FPS + fixed-timestep simulation
 let lastFrameMs   = 0;
@@ -2060,7 +2063,7 @@ function refreshGlowSpots() {
         }
     }
     glowSpots = spots;
-    glowRefreshAt = 60; // frames until next rescan
+    glowRefreshAt = 60; // sim-dt units until next rescan (FPS-independent — runs in update)
 }
 
 // ============================================================
@@ -4271,7 +4274,7 @@ function renderStaticLayer() {
     }
 
     staticDirty = false;
-    staticThrottle = STATIC_REBUILD_MIN_GAP;
+    lastStaticSec = renderTimeSec;
 }
 
 // ============================================================
@@ -4329,8 +4332,7 @@ function render() {
     // Frame-pacing: track when a heavy rebuild runs this frame so the tree-band
     // rebuild (further down) can yield and never collide with it into one spike.
     let heavyJobThisFrame = false;
-    if ((staticDirty || staticMoved) && staticThrottle <= 0) { renderStaticLayer(); heavyJobThisFrame = true; }
-    if (staticThrottle > 0) staticThrottle--;
+    if ((staticDirty || staticMoved) && (renderTimeSec - lastStaticSec) >= STATIC_REBUILD_MIN_SEC) { renderStaticLayer(); heavyJobThisFrame = true; }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
     // Shift into world space for the camera + apply the scroll-wheel view zoom:
