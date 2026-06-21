@@ -413,7 +413,7 @@ let grassSprites = null;
 // few frames (the per-tree sway is slow enough that this looks smooth).
 let treeLayerCanvas = null, treeLayerCtx = null, treeLayerCountdown = 0;
 let treeLayerCamX = 0, treeLayerCamY = 0;       // camera pos at last FULL rebuild (jump guard)
-let treeBandPhase = 0, treeBandTick = 0;        // amortized rebuild: which band, cadence counter
+let treeBandPhase = 0;                           // amortized rebuild: which band is next
 let treeContentDirty = 0;                       // frames of fast banded refresh after a tree changed
 let lastTreeBandSec = 0;                         // wall-clock time of the last band rebuild
 // Cap the canopy band-rebuild RATE by real time, not frame count, so a 144/240Hz
@@ -4712,7 +4712,7 @@ function render() {
             tlc.clearRect(0, 0, worldPxW, worldPxH);
             treeLayerCamX = camX; treeLayerCamY = camY;
             drawRows(cy0, cy1);
-            treeBandPhase = 0; treeBandTick = 0; lastTreeBandSec = renderTimeSec;
+            treeBandPhase = 0; lastTreeBandSec = renderTimeSec;
             treeLayerCountdown = 100000;        // banded refresh + guards maintain it from here
         } else {
             // AMORTIZED: refresh ONE horizontal band, spreading the rebuild cost
