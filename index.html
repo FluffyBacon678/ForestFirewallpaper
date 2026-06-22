@@ -3213,10 +3213,11 @@ function update(dt = SIM_DT) {
         const sup = burnFrac * 320;
         chance /= (1 + sup * sup);
         const wetStormRamp = Math.max(0, Math.min(1, weatherIntensitySmooth));
-        // NOTE: must not use `|| 1` here — a legit 0 (dry/clear/cloudy = no lightning)
-        // is falsy and would wrongly fall back to 1, re-enabling clear-sky fires.
-        const targetLightning = WEATHER_LIGHTNING[weatherTarget] ?? 0;
-        const currentLightning = WEATHER_LIGHTNING[weatherCurrent] ?? 0;
+        // `|| 0` (NOT `|| 1`): a legit 0 (dry/clear/cloudy = no lightning) must stay 0,
+        // and the only falsy array value IS 0, so `0 || 0 === 0` is correct. (Avoids the
+        // `??` operator for compatibility with older Wallpaper Engine CEF builds.)
+        const targetLightning = WEATHER_LIGHTNING[weatherTarget] || 0;
+        const currentLightning = WEATHER_LIGHTNING[weatherCurrent] || 0;
         chance *= currentLightning + (targetLightning - currentLightning) * wetStormRamp;
         if (chance > 0 && Math.random() < chance * dt) randomSpark();
     }
@@ -4339,7 +4340,14 @@ function render() {
     // Frame-pacing: track when a heavy rebuild runs this frame so the tree-band
     // rebuild (further down) can yield and never collide with it into one spike.
     let heavyJobThisFrame = false;
-    if ((staticDirty || staticMoved) && (renderTimeSec - lastStaticSec) >= STATIC_REBUILD_MIN_SEC) { renderStaticLayer(); heavyJobThisFrame = true; }
+    // ALWAYS rebuild if the cached layer is missing or the wrong size (first frame,
+    // after a resize/worldgen) — that must never be gated, or the blit below reads a
+    // null/stale canvas. Otherwise rate-limit dirty/moved rebuilds by wall-clock time.
+    const staticStale = !staticCanvas || staticCanvas.width !== worldPxW || staticCanvas.height !== worldPxH || staticForceFull;
+    if (staticStale ||
+        ((staticDirty || staticMoved) && (renderTimeSec - lastStaticSec) >= STATIC_REBUILD_MIN_SEC)) {
+        renderStaticLayer(); heavyJobThisFrame = true;
+    }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
     // Shift into world space for the camera + apply the scroll-wheel view zoom:
