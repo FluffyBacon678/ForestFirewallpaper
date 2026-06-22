@@ -291,10 +291,13 @@ const TREE_TINTS = [
 const bgCanvas = document.getElementById("bg");
 const bgCtx    = bgCanvas.getContext("2d");
 const canvas   = document.getElementById("c");
-// Opaque + desynchronized: the scene always covers the whole screen, so an
-// alpha-less canvas lets the browser skip blending it with the page (cheaper
-// compositing every frame); desynchronized hints low-latency presentation.
-const ctx      = canvas.getContext("2d", { alpha: false, desynchronized: true });
+// Opaque canvas: the scene always covers the whole screen, so an alpha-less canvas
+// lets the browser skip blending it with the page (cheaper compositing).
+// NOTE: `desynchronized` is deliberately OFF — it decouples canvas presentation from
+// the page compositor for low latency, but inside Wallpaper Engine's own compositor
+// that causes tearing/flicker. Ambient wallpaper doesn't need the latency, so we keep
+// presentation in sync (no flicker) instead.
+const ctx      = canvas.getContext("2d", { alpha: false });
 const debugEl  = document.getElementById("debug");
 
 let cols = 0, rows = 0;
