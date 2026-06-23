@@ -408,6 +408,169 @@ let mushroomSprite = null, cloudSprite = null;
 
 let glowCanvas, glowCtx;
 let glowHalf = null, glowHalfCtx = null; // half-res scratch for the glow blur
+
+// ── GPU fire-glow (optional, guarded) ───────────────────────────────────────
+// The fire glow is thousands of additive blobs/frame — on a 2D canvas that's
+// thousands of individual draw calls submitted from ONE CPU core, which is the
+// stutter wall on big fires (the GPU sits near-idle). When WebGL is available we
+// instead pack every blob into one buffer and issue a SINGLE instanced draw, so
+// the whole glow runs on the GPU. If WebGL is missing/blocked we fall straight
+// back to the 2D path below — same look, just CPU-bound (the original behaviour).
+let glowGPU = false;          // true once the GL glow is live
+let glGlow = null;            // { canvas, gl, prog, locs, quadBuf, instBuf, ext }
+let glowInst = new Float32Array(4096 * 8);   // interleaved instance data (grows)
+let glowInstCount = 0;        // blobs queued this frame
+const GLOW_INST_FLOATS = 8;   // center.xy, radius.xy, color.rgb, alpha
+
+function initGlowGL() {
+    if (glGlow || glowGPU) return;            // already tried
+    try {
+        const gc = document.createElement("canvas");
+        const gl = gc.getContext("webgl", {
+            alpha: true, premultipliedAlpha: true, antialias: false,
+            depth: false, stencil: false, preserveDrawingBuffer: false
+        }) || gc.getContext("experimental-webgl");
+        if (!gl) return;                       // no WebGL → stay on 2D
+        const ext = gl.getExtension("ANGLE_instanced_arrays");
+        if (!ext) return;                      // no instancing → not worth it, stay 2D
+
+        const vsSrc =
+            "attribute vec2 aCorner;attribute vec2 aCenter;attribute vec2 aRadius;" +
+            "attribute vec3 aColor;attribute float aAlpha;" +
+            "uniform vec2 uOrigin;uniform vec2 uViewport;" +
+            "varying vec2 vUV;varying vec3 vColor;varying float vAlpha;" +
+            "void main(){vec2 wp=aCenter+aCorner*aRadius;" +
+            "vec2 rel=(wp-uOrigin)/uViewport;" +
+            "gl_Position=vec4(rel.x*2.0-1.0,1.0-rel.y*2.0,0.0,1.0);" +
+            "vUV=aCorner*0.5+0.5;vColor=aColor;vAlpha=aAlpha;}";
+        const fsSrc =
+            "precision mediump float;uniform sampler2D uSprite;" +
+            "varying vec2 vUV;varying vec3 vColor;varying float vAlpha;" +
+            "void main(){float a=texture2D(uSprite,vUV).a*vAlpha;" +
+            "gl_FragColor=vec4(vColor*a,a);}";
+        const compile = (type, src) => {
+            const s = gl.createShader(type);
+            gl.shaderSource(s, src); gl.compileShader(s);
+            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+            return s;
+        };
+        const prog = gl.createProgram();
+        gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+        gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+
+        // Soft radial sprite — a bright core fading to nothing. The wide falloff
+        // gives each blob its own bloom, so no separate CPU blur pass is needed.
+        const ss = document.createElement("canvas"); ss.width = ss.height = 64;
+        const sx = ss.getContext("2d");
+        const grd = sx.createRadialGradient(32, 32, 0, 32, 32, 32);
+        grd.addColorStop(0.00, "rgba(255,255,255,1)");
+        grd.addColorStop(0.30, "rgba(255,255,255,0.62)");
+        grd.addColorStop(0.65, "rgba(255,255,255,0.20)");
+        grd.addColorStop(1.00, "rgba(255,255,255,0)");
+        sx.fillStyle = grd; sx.fillRect(0, 0, 64, 64);
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, ss);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const quadBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+        const instBuf = gl.createBuffer();
+
+        const locs = {
+            aCorner: gl.getAttribLocation(prog, "aCorner"),
+            aCenter: gl.getAttribLocation(prog, "aCenter"),
+            aRadius: gl.getAttribLocation(prog, "aRadius"),
+            aColor: gl.getAttribLocation(prog, "aColor"),
+            aAlpha: gl.getAttribLocation(prog, "aAlpha"),
+            uOrigin: gl.getUniformLocation(prog, "uOrigin"),
+            uViewport: gl.getUniformLocation(prog, "uViewport"),
+            uSprite: gl.getUniformLocation(prog, "uSprite")
+        };
+
+        gl.disable(gl.DEPTH_TEST);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE);          // premultiplied additive
+        gl.clearColor(0, 0, 0, 0);
+        // Lose-context safety: drop back to the 2D glow if the GPU context dies.
+        gc.addEventListener("webglcontextlost", (e) => { e.preventDefault(); glowGPU = false; });
+
+        glGlow = { canvas: gc, gl, prog, locs, quadBuf, instBuf, ext, tex };
+        glowGPU = true;
+    } catch (e) {
+        glGlow = null; glowGPU = false;        // any failure → silent 2D fallback
+    }
+}
+
+// Queue one glow blob. GPU path packs an instance; 2D path draws it immediately
+// (bit-for-bit the original behaviour, so the fallback is the proven code).
+function emitGlow(cx, cy, rx, ry, R, G, B, A) {
+    if (glowGPU) {
+        if ((glowInstCount + 1) * GLOW_INST_FLOATS > glowInst.length) {
+            const n = new Float32Array(glowInst.length * 2); n.set(glowInst); glowInst = n;
+        }
+        let o = glowInstCount * GLOW_INST_FLOATS;
+        glowInst[o] = cx; glowInst[o + 1] = cy; glowInst[o + 2] = rx; glowInst[o + 3] = ry;
+        glowInst[o + 4] = R / 255; glowInst[o + 5] = G / 255; glowInst[o + 6] = B / 255; glowInst[o + 7] = A;
+        glowInstCount++;
+    } else {
+        glowCtx.globalAlpha = A;
+        glowCtx.fillStyle = rgbQ(R, G, B);
+        glowCtx.beginPath();
+        if (rx === ry) glowCtx.arc(cx, cy, rx, 0, 6.2831853);
+        else glowCtx.ellipse(cx, cy, rx, ry, 0, 0, 6.2831853);
+        glowCtx.fill();
+    }
+}
+
+// Upload the queued blobs and issue ONE instanced draw covering the fire's
+// bounding box [ox,oy,vw,vh] (world px). Returns the GL canvas for compositing.
+function flushGlowGL(ox, oy, vw, vh) {
+    const g = glGlow, gl = g.gl, L = g.locs, ext = g.ext;
+    // Pre-sized at resize() to viewport+margin; clamp (never resize the drawing
+    // buffer here — a mid-run realloc would hitch). At worst the extreme edge of a
+    // larger-than-expected region is clipped, which is off-screen anyway.
+    if (vw > g.canvas.width) vw = g.canvas.width;
+    if (vh > g.canvas.height) vh = g.canvas.height;
+    const H = g.canvas.height;
+    gl.viewport(0, H - vh, vw, vh);            // render into the TOP-left vw×vh (display space)
+    gl.disable(gl.SCISSOR_TEST);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (glowInstCount === 0) return g.canvas;
+
+    gl.useProgram(g.prog);
+    gl.uniform2f(L.uOrigin, ox, oy);
+    gl.uniform2f(L.uViewport, vw, vh);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, g.tex);
+    gl.uniform1i(L.uSprite, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.quadBuf);
+    gl.enableVertexAttribArray(L.aCorner);
+    gl.vertexAttribPointer(L.aCorner, 2, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(L.aCorner, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.instBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, glowInst.subarray(0, glowInstCount * GLOW_INST_FLOATS), gl.DYNAMIC_DRAW);
+    const STR = GLOW_INST_FLOATS * 4;
+    const bind = (loc, size, off) => {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STR, off);
+        ext.vertexAttribDivisorANGLE(loc, 1);
+    };
+    bind(L.aCenter, 2, 0);
+    bind(L.aRadius, 2, 8);
+    bind(L.aColor, 3, 16);
+    bind(L.aAlpha, 1, 28);
+    ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, glowInstCount);
+    return g.canvas;
+}
 let hazeCanvas = null, hazeCtx = null;   // scratch buffer for heat-shimmer distortion
 let treeSprites = null;
 let grassSprites = null;
@@ -2416,6 +2579,17 @@ function resize() {
     if (!glowCanvas) {
         glowCanvas = document.createElement("canvas");
         glowCtx    = glowCanvas.getContext("2d");
+        initGlowGL();   // try to put the fire glow on the GPU (falls back to 2D)
+    }
+    // Pre-size the GL glow buffer to the viewport (+margin) ONCE here. The fire
+    // bbox is always within the visible window, so this covers it without ever
+    // resizing the WebGL drawing buffer mid-run — a realloc would cause a hitch.
+    if (glGlow) {
+        const gW = w + 400, gH = h + 400;
+        if (glGlow.canvas.width < gW || glGlow.canvas.height < gH) {
+            glGlow.canvas.width  = Math.max(glGlow.canvas.width, gW);
+            glGlow.canvas.height = Math.max(glGlow.canvas.height, gH);
+        }
     }
 
     rebuildGrid();          // sizes the (larger) world grid + worldPxW/H
@@ -4793,23 +4967,20 @@ function render() {
         const vx1 = Math.min(cols - 1, Math.ceil((camX + w + gPad) / cell));
         const vy0 = Math.max(0, ((camY - gPad) / cell) | 0);
         const vy1 = Math.min(rows - 1, Math.ceil((camY + h + gPad) / cell));
-        glowCtx.clearRect(Math.max(0, camX - gPad), Math.max(0, camY - gPad),
+        if (!glowGPU) glowCtx.clearRect(Math.max(0, camX - gPad), Math.max(0, camY - gPad),
                           w + gPad * 2, h + gPad * 2);
+        glowInstCount = 0;   // reset the GPU instance queue for this frame
         // Glow level-of-detail. A screen-filling blaze is thousands of cells × 3
-        // additive blobs — a GPU fill-rate wall that drops frames (stutter) on weak
-        // cards at 4K. Every cell still draws its MAIN flame, but the EXTRA layers
-        // (ember-bed, bright core, water firelight) are limited to a STABLE per-cell
-        // subset once the fire is large; in a dense overlapping blaze the dropped
-        // layers are invisible. burningCount is quantized so the subset doesn't churn
-        // frame-to-frame (which would itself flicker).
+        // additive blobs. On the 2D path that's thousands of CPU draw calls — a
+        // stutter wall on big fires — so the EXTRA layers (ember-bed, bright core,
+        // water firelight) and, for a huge blaze, even some MAIN flames are limited
+        // to a STABLE per-cell subset (neighbours' enlarged glow hides the gaps).
+        // burningCount is quantized so the subset doesn't churn frame-to-frame
+        // (which would itself flicker). On the GPU path all of this is a SINGLE
+        // instanced draw, so we keep every cell + every layer — full quality.
         const glowQ = Math.round(burningCount / 128) * 128;
-        const glowExtraFrac = glowQ > 380 ? 380 / glowQ : 1;
-        // For a HUGE blaze, also draw the main flame for only a stable subset of cells
-        // (the rest are covered by neighbours' enlarged glow) — this is what keeps the
-        // per-frame draw-call count, and thus the single-threaded render cost, from
-        // scaling without limit as the fire fills the screen. Kept ≥0.45 so the glow
-        // stays continuous; drawn blobs are enlarged to cover the skipped cells.
-        const glowCellFrac = glowQ > 1000 ? Math.max(0.45, 1000 / glowQ) : 1;
+        const glowExtraFrac = glowGPU ? 1 : (glowQ > 380 ? 380 / glowQ : 1);
+        const glowCellFrac  = glowGPU ? 1 : (glowQ > 1000 ? Math.max(0.45, 1000 / glowQ) : 1);
         const glowSizeBoost = glowCellFrac < 1 ? 1 / Math.sqrt(glowCellFrac) : 1;
         for (let y = vy0; y <= vy1; y++) {
             const rowBase = y * cols;
@@ -4846,13 +5017,10 @@ function render() {
                         const shim = 0.5 + 0.5 * Math.sin(renderTimeSec * 5.0 + wx * 0.7 + wy * 1.3);
                         const wa = intensity * (1 - (dist - 1) * 0.4) * 0.42 * shim;
                         if (wa <= 0.02) continue;
-                        glowCtx.globalAlpha = wa;
-                        glowCtx.fillStyle = rgbQ(255, 150 + (intensity * 55 | 0), 55);
                         const wr = cell * (0.55 + 0.3 * shim);
-                        glowCtx.beginPath();
-                        glowCtx.ellipse(wx * cell + cell * 0.5, wy * cell + cell * 0.55,
-                                        wr, wr * 0.5, 0, 0, 6.2831853);   // flattened = surface reflection
-                        glowCtx.fill();
+                        // flattened (rx≠ry) = surface reflection on the water
+                        emitGlow(wx * cell + cell * 0.5, wy * cell + cell * 0.55,
+                                 wr, wr * 0.5, 255, 150 + (intensity * 55 | 0), 55, wa);
                     }
                 }
 
@@ -4885,17 +5053,10 @@ function render() {
 
                 if (mGlow) {
                     const mc = MAGIC_FIRE[mGlow - 1];
-                    glowCtx.fillStyle = rgbQ(mc[0], mc[1], mc[2]);
-                    glowCtx.globalAlpha = 0.5 + intensity * 0.3;
-                    glowCtx.beginPath();
-                    glowCtx.arc(cxP, cyP, flameR, 0, Math.PI * 2);
-                    glowCtx.fill();
+                    emitGlow(cxP, cyP, flameR, flameR, mc[0], mc[1], mc[2], 0.5 + intensity * 0.3);
                     // lighter inner
-                    glowCtx.fillStyle = rgbQ(mc[0] + 90, mc[1] + 60, mc[2] + 60);
-                    glowCtx.globalAlpha = 0.4 + intensity * 0.35;
-                    glowCtx.beginPath();
-                    glowCtx.arc(cxP, cyP, flameR * 0.5, 0, Math.PI * 2);
-                    glowCtx.fill();
+                    emitGlow(cxP, cyP, flameR * 0.5, flameR * 0.5,
+                             mc[0] + 90, mc[1] + 60, mc[2] + 60, 0.4 + intensity * 0.35);
                 } else {
                     // Per-cell warm-hue variety so a field of low flames reads as a
                     // living ember bed (deep-red ↔ ember-orange ↔ amber).
@@ -4930,19 +5091,13 @@ function render() {
                     // (Extra layer — skipped for most cells in a dense blaze; see glowExtra.)
                     if (glowExtra) {
                         const bedR = (isTree ? cell * 0.95 : cell * 0.74) * (0.62 + intensity * 0.7) * (1 + heat * 0.4) * glowSizeBoost;
-                        glowCtx.fillStyle = rgbQ(230 + (vhue * 25) | 0, (oG * 0.62) | 0, (oB * 0.5) | 0);
-                        glowCtx.globalAlpha = Math.min(1, (0.20 + intensity * 0.22) * breathe * frontBoost);
-                        glowCtx.beginPath();
-                        glowCtx.arc(cxP, cyP, bedR, 0, Math.PI * 2);
-                        glowCtx.fill();
+                        emitGlow(cxP, cyP, bedR, bedR, 230 + (vhue * 25) | 0, (oG * 0.62) | 0, (oB * 0.5) | 0,
+                                 Math.min(1, (0.20 + intensity * 0.22) * breathe * frontBoost));
                     }
 
                     // Mid flame — the warm hue, at the flame radius (ALWAYS drawn)
-                    glowCtx.fillStyle = rgbQ(255, oG, oB);
-                    glowCtx.globalAlpha = Math.min(1, (0.5 + intensity * 0.3) * breathe);
-                    glowCtx.beginPath();
-                    glowCtx.arc(cxP, cyP, flameR, 0, Math.PI * 2);
-                    glowCtx.fill();
+                    emitGlow(cxP, cyP, flameR, flameR, 255, oG, oB,
+                             Math.min(1, (0.5 + intensity * 0.3) * breathe));
 
                     // Bright core — warm amber/white-hot; cools with the dying tail.
                     // (Extra layer — skipped for most cells in a dense blaze; see glowExtra.)
@@ -4950,11 +5105,8 @@ function render() {
                         let iG = (150 + hot * 70 - dying * 64) | 0;
                         let iB = (45 + hot * 90 - dying * 40) | 0;
                         if (iG < 30) iG = 30; if (iB < 5) iB = 5;
-                        glowCtx.fillStyle = rgbQ(255, iG, iB);
-                        glowCtx.globalAlpha = Math.min(1, (0.40 + intensity * 0.35) * breathe * frontBoost);
-                        glowCtx.beginPath();
-                        glowCtx.arc(cxP, cyP, flameR * 0.5, 0, Math.PI * 2);
-                        glowCtx.fill();
+                        emitGlow(cxP, cyP, flameR * 0.5, flameR * 0.5, 255, iG, iB,
+                                 Math.min(1, (0.40 + intensity * 0.35) * breathe * frontBoost));
                     }
                 }
             }
@@ -4971,38 +5123,57 @@ function render() {
         const gy1 = Math.min(worldPxH, (fbY1 + cell + gpad) | 0);
         const gw = gx1 - gx0, gh = gy1 - gy0;
         if (gw > 0 && gh > 0) {
-            if (props.fireGlow > 0 && qGlowBlur) {
-                const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
-                const glowAmt = props.fireGlow * audioBoost;
-                // Half-resolution blur: downscale the glow region 2×, blur at
-                // half the radius, and let the upscale smooth it back out —
-                // same soft bloom for a quarter of the blur work.
-                const hw = Math.max(1, gw >> 1), hh = Math.max(1, gh >> 1);
-                if (!glowHalf) { glowHalf = document.createElement("canvas"); glowHalfCtx = glowHalf.getContext("2d"); }
-                if (glowHalf.width < hw || glowHalf.height < hh) {
-                    glowHalf.width = Math.max(glowHalf.width, hw);
-                    glowHalf.height = Math.max(glowHalf.height, hh);
-                }
-                glowHalfCtx.clearRect(0, 0, hw, hh);
-                glowHalfCtx.save();
-                // Blur radius is the glow's biggest fill-rate cost; trim it under load
-                // (0.65×–1×). Subtly tighter glow only when frames are already dropping.
-                glowHalfCtx.filter = `blur(${(5.5 * glowAmt * (0.65 + 0.35 * perfQuality)).toFixed(1)}px)`;
-                glowHalfCtx.drawImage(glowCanvas, gx0, gy0, gw, gh, 0, 0, hw, hh);
-                glowHalfCtx.restore();
+            const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
+            const glowAmt = props.fireGlow * audioBoost;
+            if (glowGPU) {
+                // GPU path: every queued blob was rendered in ONE instanced draw on
+                // the soft radial sprite (its wide falloff = the bloom, so no CPU blur
+                // pass). Composite the GL buffer additively over the scene — a stronger
+                // bloom pass scaled by the fireGlow knob, plus a constant base pass for
+                // the ember/core sharpness (mirrors the old 2D screen+lighter pair).
+                const glc = flushGlowGL(gx0, gy0, gw, gh);
                 ctx.save();
-                ctx.globalAlpha = Math.min(1, 0.5 * glowAmt);
-                ctx.globalCompositeOperation = "screen";
                 ctx.imageSmoothingEnabled = true;
-                ctx.drawImage(glowHalf, 0, 0, hw, hh, gx0, gy0, gw, gh);
+                ctx.globalCompositeOperation = "lighter";
+                if (props.fireGlow > 0 && qGlowBlur) {
+                    ctx.globalAlpha = Math.min(1, 0.6 * glowAmt);
+                    ctx.drawImage(glc, 0, 0, gw, gh, gx0, gy0, gw, gh);
+                }
+                ctx.globalAlpha = 0.4;   // base ember glow, always a touch
+                ctx.drawImage(glc, 0, 0, gw, gh, gx0, gy0, gw, gh);
+                ctx.restore();
+            } else {
+                if (props.fireGlow > 0 && qGlowBlur) {
+                    // Half-resolution blur: downscale the glow region 2×, blur at
+                    // half the radius, and let the upscale smooth it back out —
+                    // same soft bloom for a quarter of the blur work.
+                    const hw = Math.max(1, gw >> 1), hh = Math.max(1, gh >> 1);
+                    if (!glowHalf) { glowHalf = document.createElement("canvas"); glowHalfCtx = glowHalf.getContext("2d"); }
+                    if (glowHalf.width < hw || glowHalf.height < hh) {
+                        glowHalf.width = Math.max(glowHalf.width, hw);
+                        glowHalf.height = Math.max(glowHalf.height, hh);
+                    }
+                    glowHalfCtx.clearRect(0, 0, hw, hh);
+                    glowHalfCtx.save();
+                    // Blur radius is the glow's biggest fill-rate cost; trim it under load
+                    // (0.65×–1×). Subtly tighter glow only when frames are already dropping.
+                    glowHalfCtx.filter = `blur(${(5.5 * glowAmt * (0.65 + 0.35 * perfQuality)).toFixed(1)}px)`;
+                    glowHalfCtx.drawImage(glowCanvas, gx0, gy0, gw, gh, 0, 0, hw, hh);
+                    glowHalfCtx.restore();
+                    ctx.save();
+                    ctx.globalAlpha = Math.min(1, 0.5 * glowAmt);
+                    ctx.globalCompositeOperation = "screen";
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.drawImage(glowHalf, 0, 0, hw, hh, gx0, gy0, gw, gh);
+                    ctx.restore();
+                }
+                // A touch of the sharp glow for the embers/core, kept low
+                ctx.save();
+                ctx.globalAlpha = 0.4;
+                ctx.globalCompositeOperation = "lighter";
+                ctx.drawImage(glowCanvas, gx0, gy0, gw, gh, gx0, gy0, gw, gh);
                 ctx.restore();
             }
-            // A touch of the sharp glow for the embers/core, kept low
-            ctx.save();
-            ctx.globalAlpha = 0.4;
-            ctx.globalCompositeOperation = "lighter";
-            ctx.drawImage(glowCanvas, gx0, gy0, gw, gh, gx0, gy0, gw, gh);
-            ctx.restore();
         }
     }
 
