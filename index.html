@@ -97,7 +97,7 @@ const props = {
     rgbEdgeMode:       true,
     rgbEdgeStrength:   0.7,
     // Performance
-    quality:           "high",
+    quality:           "auto",
     fpsCap:            "120",
     // Audio reactivity (Wallpaper Engine system audio)
     audioReactive:     true,
@@ -988,6 +988,40 @@ function applyQuality(q) {
         case "ultra":  qMul = 1.60; qBandMul = 1.0; qGlowBlur = true;  break;
         default:       qMul = 1.00; qBandMul = 1.0; qGlowBlur = true;
     }
+}
+
+// ── Capability tiering ──────────────────────────────────────────────────────
+// Wallpaper Engine runs mostly on gaming rigs, so on "Auto" we match the quality
+// to the GPU class read from the WebGL renderer string: a strong card (RTX /
+// modern Radeon / Arc) opens at Ultra, a mid card (GTX 10/16-series) at High,
+// integrated graphics at Medium, and a software rasteriser at Low. The adaptive
+// governor still trims within the chosen tier. A real device choice (Low..Ultra)
+// always wins. Defined once so the result is stable for the session.
+let gpuRenderer = "", autoQualityCache = "";
+function gpuQualityAuto() {
+    if (autoQualityCache) return autoQualityCache;
+    if (!glGlow) return "medium";                 // no WebGL host → CPU-bound, stay modest
+    try {
+        const gl = glGlow.gl, dbg = gl.getExtension("WEBGL_debug_renderer_info");
+        gpuRenderer = dbg ? (gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || "") : "";
+    } catch (e) { gpuRenderer = ""; }
+    const r = gpuRenderer.toLowerCase();
+    let q;
+    if (!r) q = "high";                           // masked string → safe upper-middle
+    else if (/swiftshader|llvmpipe|software|basic render|microsoft basic/.test(r)) q = "low";
+    else if (/rtx|geforce rtx|radeon rx (6|7|9)\d{3}|\barc\b|a7\d0|a5\d0/.test(r)) q = "ultra";
+    else if (/gtx 1[0678]|gtx 9|geforce gtx|radeon rx (4|5)\d{2}|vega|quadro|radeon pro/.test(r)) q = "high";
+    else if (/intel|uhd graphics|hd graphics|iris/.test(r)) q = "medium";
+    else q = "high";                              // unknown discrete card → assume capable
+    autoQualityCache = q;
+    return q;
+}
+// Resolve the quality property, mapping "auto" through the GPU probe. Call AFTER
+// the GL context exists (post-resize) so the renderer string is available.
+function resolveQuality() {
+    const q = (props.quality === "auto") ? gpuQualityAuto() : props.quality;
+    applyQuality(q);
+    return q;
 }
 
 function applyFpsCap(v) {
@@ -2681,7 +2715,15 @@ function rebuildGrid() {
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     // World is "worldSize" times the viewport in each dimension, so there's room
     // for the camera to pan around. worldSize 1 = world == screen (no pan).
-    const ws = Math.max(1, props.worldSize || 1);
+    let ws = Math.max(1, props.worldSize || 1);
+    // RAM safety: the cached ground layers (bg/terrain/static) are each
+    // worldPxW*worldPxH*4 bytes. Cap the world's pixel area so a large worldSize at
+    // 4K/5K/8K can't exhaust memory (≈64MP → ~0.75GB across the three layers, fine
+    // for the 16GB+ target). Only bites at extreme resolution×worldSize; normal use
+    // is well under it. The pan range shrinks slightly instead of risking an OOM.
+    const MAX_WORLD_MP = 64e6;
+    const wpx = canvas.width * ws, wpy = canvas.height * ws;
+    if (wpx * wpy > MAX_WORLD_MP) ws *= Math.sqrt(MAX_WORLD_MP / (wpx * wpy));
     cols = Math.ceil(canvas.width  * ws / cell) + 1;
     rows = Math.ceil(canvas.height * ws / cell) + 1;
     worldPxW = cols * cell;
@@ -2857,8 +2899,10 @@ function resize() {
     // ...the world-space layers are sized to the whole world.
     bgCanvas.width  = worldPxW;
     bgCanvas.height = worldPxH;
-    glowCanvas.width  = worldPxW;
-    glowCanvas.height = worldPxH;
+    // The 2D glow buffer is only used by the fallback path — on the GPU it's dead
+    // weight (a whole world-sized canvas), so keep it 1×1 when the GL glow is live.
+    if (glowGPU) { glowCanvas.width = 1; glowCanvas.height = 1; }
+    else { glowCanvas.width = worldPxW; glowCanvas.height = worldPxH; }
 
     drawDirtBackground();   // draws the world floor into bgCanvas
     windStreaks = [];
@@ -6195,7 +6239,7 @@ function applyProperty(key, raw) {
             break;
         case "quality":
             props.quality = String(v);
-            applyQuality(props.quality);
+            resolveQuality();   // "auto" → GPU-matched tier; a real choice wins
             break;
         case "fpsCap":
             props.fpsCap = String(v);
@@ -6240,9 +6284,10 @@ if (typeof window.wallpaperRegisterAudioListener === "function") {
 // ============================================================
 // Boot
 // ============================================================
-applyQuality(props.quality);
+applyQuality(props.quality);   // provisional (pre-GL) tier
 applyFpsCap(props.fpsCap);
-resize();
+resize();                      // builds the GL context…
+resolveQuality();              // …so "auto" can now read the GPU class
 // Seed a starter fire so the wallpaper opens with visible action
 if (props.seedFireOnStart) {
     setTimeout(() => {

@@ -19,8 +19,9 @@
                 "order":  1,
                 "text":   "Quality preset",
                 "type":   "combo",
-                "value":  "high",
+                "value":  "auto",
                 "options": [
+                    { "label": "Auto (match your GPU — recommended)",       "value": "auto"   },
                     { "label": "Low (40% particles, mobile/iGPU friendly)", "value": "low"    },
                     { "label": "Medium (70% particles, balanced)",          "value": "medium" },
                     { "label": "High (100% particles, default)",            "value": "high"   },
