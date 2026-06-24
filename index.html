@@ -781,6 +781,11 @@ function renderTreesGPU(w, h, cell, vw, vh) {
         treeSinTab[k] = swayWxF * Math.sin(swayT * treeSwayFreq[k] + treeSwayPhase[k]) * swayScale * treeSwayAmp[k];
     }
     const B1 = TREE_SIZE_BUCKETS - 1;
+    // Spring blossoms — a soft pink dab on a stable ~3/8 of trees (the 2D path
+    // stipples 1px dots; one soft sprite reads the same at this scale). Queued in
+    // the screen-space fx list and drawn as a small alpha pass over the canopy.
+    const blossom = (seasonParam && seasonParam.blossom) ? seasonParam.blossom : 0;
+    if (blossom > 0) fxInstCount = 0;
     treeInstCount = 0;
     for (let y = cy0; y <= cy1; y++) {
         const rowBase = y * cols;
@@ -804,6 +809,10 @@ function renderTreesGPU(w, h, cell, vw, vh) {
             const dx = baseX - dw * 0.5, dy = baseY - dh;
             emitTree((dx - camX) * z, (dy - camY) * z, dw * z, dh * z,
                      tv * treeScaledCellW, b * treeScaledCellH, sw0, sh0, charAmt);
+            if (blossom > 0 && charAmt < 0.1 && (((i * 2246822519) >>> 0) & 7) < 3) {
+                emitFx(dx + dw * 0.5, dy + dh * 0.24, dw * 0.26, dh * 0.2,
+                       248, 170, 205, 0.5 * blossom);
+            }
         }
     }
     const tc = flushTreesGL(w, h);
@@ -812,6 +821,12 @@ function renderTreesGPU(w, h, cell, vw, vh) {
     ctx.globalCompositeOperation = "source-over";
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(tc, 0, 0, w, h, 0, 0, w, h);
+    // Blossom dabs — soft alpha pass on top of the just-composited canopy.
+    if (blossom > 0 && fxInstCount > 0) {
+        const bc = glDrawInstanced(fxInst, fxInstCount, 0, 0, w, h, false);
+        ctx.globalCompositeOperation = "source-over";
+        ctx.drawImage(bc, 0, 0, w, h, 0, 0, w, h);
+    }
     ctx.restore();   // back to the world transform
 }
 let hazeCanvas = null, hazeCtx = null;   // scratch buffer for heat-shimmer distortion
