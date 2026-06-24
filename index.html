@@ -486,9 +486,12 @@ function initGlowGL() {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-        const quadBuf = gl.createBuffer();
+        const quadBuf = gl.createBuffer();              // centred (-1..1) — soft blobs
         gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+        const quadBuf01 = gl.createBuffer();            // top-left (0..1) — textured sprites
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf01);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
         const instBuf = gl.createBuffer();
 
         const locs = {
@@ -509,7 +512,7 @@ function initGlowGL() {
         // Lose-context safety: drop back to the 2D glow if the GPU context dies.
         gc.addEventListener("webglcontextlost", (e) => { e.preventDefault(); glowGPU = false; });
 
-        glGlow = { canvas: gc, gl, prog, locs, quadBuf, instBuf, ext, tex };
+        glGlow = { canvas: gc, gl, prog, locs, quadBuf, quadBuf01, instBuf, ext, tex };
         glowGPU = true;
     } catch (e) {
         glGlow = null; glowGPU = false;        // any failure → silent 2D fallback
@@ -629,6 +632,188 @@ function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     return g.canvas;
 }
 function flushGlowGL(ox, oy, vw, vh) { return glDrawInstanced(glowInst, glowInstCount, ox, oy, vw, vh, true); }
+
+// ── GPU instanced trees (optional, guarded) ─────────────────────────────────
+// The cached canopy is blitted cheaply but must be REBUILT in bands for sway —
+// thousands of drawImage calls/sec from one CPU core, the frame-time spikes on
+// big scenes (worse at 5K). Instead, every visible tree becomes one instance of
+// a textured quad sampled from the same scaled atlas; sway is a per-instance x
+// shift, a burning tree carries a char amount. One instanced draw replaces the
+// whole banded rebuild — and there's no world-sized tree canvas to rebuild or
+// keep in RAM. Guarded: if the tree program can't init we keep the 2D cache.
+let treeGPU = false;          // true once the GL tree program is live
+let glTree = null;            // { prog, locs, instBuf, tex, atlasVer }
+const TREE_INST_FLOATS = 9;   // dst(x,y,w,h) uv(u,v,w,h) char
+let treeInst = new Float32Array(8192 * TREE_INST_FLOATS);
+let treeInstCount = 0;
+let treeAtlasVer = 0;         // bumped when buildScaledTreeAtlas re-bakes (re-upload)
+
+function initTreeGL() {
+    if (!glGlow || glTree || treeGPU) return;       // need the shared GL context
+    try {
+        const gl = glGlow.gl, ext = glGlow.ext;
+        const vsSrc =
+            "attribute vec2 aCorner;attribute vec4 aDst;attribute vec4 aUV;attribute float aChar;" +
+            "uniform vec2 uViewport;uniform vec2 uAtlas;" +
+            "varying vec2 vUV;varying float vChar;" +
+            "void main(){vec2 dst=aDst.xy+aCorner*aDst.zw;" +
+            "vec2 rel=dst/uViewport;" +
+            "gl_Position=vec4(rel.x*2.0-1.0,1.0-rel.y*2.0,0.0,1.0);" +
+            "vUV=(aUV.xy+aCorner*aUV.zw)/uAtlas;vChar=aChar;}";
+        const fsSrc =
+            "precision mediump float;uniform sampler2D uTree;" +
+            "varying vec2 vUV;varying float vChar;" +
+            "void main(){vec4 t=texture2D(uTree,vUV);" +          // premultiplied
+            "vec3 dark=vec3(0.110,0.078,0.059)*t.a;" +            // (28,20,15)/255
+            "gl_FragColor=vec4(mix(t.rgb,dark,vChar*0.72),t.a);}";
+        const compile = (type, src) => {
+            const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+            return s;
+        };
+        const prog = gl.createProgram();
+        gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+        gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+        const tex = gl.createTexture();
+        const locs = {
+            aCorner: gl.getAttribLocation(prog, "aCorner"),
+            aDst: gl.getAttribLocation(prog, "aDst"),
+            aUV: gl.getAttribLocation(prog, "aUV"),
+            aChar: gl.getAttribLocation(prog, "aChar"),
+            uViewport: gl.getUniformLocation(prog, "uViewport"),
+            uAtlas: gl.getUniformLocation(prog, "uAtlas"),
+            uTree: gl.getUniformLocation(prog, "uTree")
+        };
+        glTree = { prog, locs, instBuf: gl.createBuffer(), tex, atlasVer: -1 };
+        treeGPU = true;
+    } catch (e) { glTree = null; treeGPU = false; }
+}
+
+// (Re)upload the scaled tree atlas as a premultiplied GL texture when it changes.
+function uploadTreeAtlas() {
+    if (!treeGPU || !treeScaled) return;
+    if (glTree.atlasVer === treeAtlasVer) return;
+    const gl = glGlow.gl;
+    gl.bindTexture(gl.TEXTURE_2D, glTree.tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, treeScaled);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glTree.atlasVer = treeAtlasVer;
+}
+
+// Pack one tree instance (screen-space, already swayed/sized). u0,v0,uw,vh are
+// atlas pixels; sx,sy,sw,sh are screen pixels; char 0..1.
+function emitTree(sx, sy, sw, sh, u0, v0, uw, vh, charAmt) {
+    if ((treeInstCount + 1) * TREE_INST_FLOATS > treeInst.length) {
+        const n = new Float32Array(treeInst.length * 2); n.set(treeInst); treeInst = n;
+    }
+    let o = treeInstCount * TREE_INST_FLOATS;
+    treeInst[o] = sx; treeInst[o + 1] = sy; treeInst[o + 2] = sw; treeInst[o + 3] = sh;
+    treeInst[o + 4] = u0; treeInst[o + 5] = v0; treeInst[o + 6] = uw; treeInst[o + 7] = vh;
+    treeInst[o + 8] = charAmt;
+    treeInstCount++;
+}
+
+// One instanced draw of every queued tree into the GL canvas (alpha-blended,
+// back-to-front by queue order). Returns the canvas for compositing at vw×vh.
+function flushTreesGL(vw, vh) {
+    const g = glGlow, gl = g.gl, ext = g.ext, L = glTree.locs;
+    if (vw > g.canvas.width) vw = g.canvas.width;
+    if (vh > g.canvas.height) vh = g.canvas.height;
+    const H = g.canvas.height;
+    gl.viewport(0, H - vh, vw, vh);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (treeInstCount === 0) return g.canvas;
+    uploadTreeAtlas();
+    gl.useProgram(glTree.prog);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // premultiplied source-over
+    gl.uniform2f(L.uViewport, vw, vh);
+    gl.uniform2f(L.uAtlas, treeScaled.width, treeScaled.height);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, glTree.tex);
+    gl.uniform1i(L.uTree, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.quadBuf01);
+    gl.enableVertexAttribArray(L.aCorner);
+    gl.vertexAttribPointer(L.aCorner, 2, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(L.aCorner, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, glTree.instBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, treeInst.subarray(0, treeInstCount * TREE_INST_FLOATS), gl.DYNAMIC_DRAW);
+    const STR = TREE_INST_FLOATS * 4;
+    const bind = (loc, size, off) => {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STR, off);
+        ext.vertexAttribDivisorANGLE(loc, 1);
+    };
+    bind(L.aDst, 4, 0);
+    bind(L.aUV, 4, 16);
+    bind(L.aChar, 1, 32);
+    ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, treeInstCount);
+    return g.canvas;
+}
+
+// GPU replacement for PASS 3: pack every visible tree as a screen-space instance
+// (top→bottom so nearer trees draw over farther ones), draw them all in one call,
+// composite over the scene. Replaces the cached canopy + its banded rebuild.
+function renderTreesGPU(w, h, cell, vw, vh) {
+    const z = viewZoom;
+    const maxDw = treeScaledCellW, maxDh = treeScaledCellH;
+    const MX = (maxDw >> 1) + 160, MY = maxDh + 160;     // overhang + a little slack
+    const cx0 = Math.max(0, ((camX - MX) / cell) | 0);
+    const cx1 = Math.min(cols - 1, Math.ceil((camX + vw + MX) / cell));
+    const cy0 = Math.max(0, ((camY - MY) / cell) | 0);
+    const cy1 = Math.min(rows - 1, Math.ceil((camY + vh + MY) / cell));
+    // Sway — same per-(variant,cell) table the 2D path uses, recomputed each frame
+    // (cheap: TREE_SWAY_SLOTS sines) and applied as a per-instance x shift.
+    const swayScale = Math.min(1.7, props.windStrength + gustStrength * 0.7) * cell * 0.10;
+    const swayWxF = Math.cos(windAngle);
+    const swayT = renderTimeSec * 1.9;
+    if (!treeSwayBuilt) buildTreeSwayTables();
+    for (let k = 0; k < TREE_SWAY_SLOTS; k++) {
+        treeSinTab[k] = swayWxF * Math.sin(swayT * treeSwayFreq[k] + treeSwayPhase[k]) * swayScale * treeSwayAmp[k];
+    }
+    const B1 = TREE_SIZE_BUCKETS - 1;
+    treeInstCount = 0;
+    for (let y = cy0; y <= cy1; y++) {
+        const rowBase = y * cols;
+        for (let x = cx0; x <= cx1; x++) {
+            const i = rowBase + x;
+            const s = grid[i];
+            if (s !== TREE && s !== BURN_TREE) continue;
+            const tv = treeVar[i];
+            const swX = treeSinTab[(tv << 5) | (i & 31)];
+            const g = treeGrowth[i] || 1;
+            const b = (g * B1 + 0.5) | 0;
+            const sw0 = treeScaledW[b], sh0 = treeScaledH[b];
+            let dw = sw0, dh = sh0, charAmt = 0;
+            if (s === BURN_TREE) {
+                const age = burnMax[i] > 0 ? (1 - burnTimer[i] / burnMax[i]) : 0;
+                const burn = age < 0.35 ? 0 : (age - 0.35) / 0.65;
+                dw = sw0 * (1 - burn * 0.45); dh = sh0 * (1 - burn * 0.45); charAmt = burn;
+            }
+            const baseX = x * cell + cell * 0.5 + jitterX[i] * 0.7 + swX;
+            const baseY = y * cell + cell * 0.92 + jitterY[i] * 0.4;
+            const dx = baseX - dw * 0.5, dy = baseY - dh;
+            emitTree((dx - camX) * z, (dy - camY) * z, dw * z, dh * z,
+                     tv * treeScaledCellW, b * treeScaledCellH, sw0, sh0, charAmt);
+        }
+    }
+    const tc = flushTreesGL(w, h);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(tc, 0, 0, w, h, 0, 0, w, h);
+    ctx.restore();   // back to the world transform
+}
 let hazeCanvas = null, hazeCtx = null;   // scratch buffer for heat-shimmer distortion
 let treeSprites = null;
 let grassSprites = null;
@@ -965,6 +1150,7 @@ function buildScaledTreeAtlas() {
                         v * treeScaledCellW, b * treeScaledCellH, dw, dh);
         }
     }
+    treeAtlasVer++;   // the GPU tree path re-uploads this atlas on the next frame
 }
 
 // ============================================================
@@ -2638,6 +2824,7 @@ function resize() {
         glowCanvas = document.createElement("canvas");
         glowCtx    = glowCanvas.getContext("2d");
         initGlowGL();   // try to put the fire glow on the GPU (falls back to 2D)
+        initTreeGL();   // …and the trees (shares the same GL context)
     }
     // Pre-size the GL glow buffer to the viewport (+margin) ONCE here. The fire
     // bbox is always within the visible window, so this covers it without ever
@@ -4863,6 +5050,9 @@ function render() {
     // frames) then blitted. Rows go top→bottom so nearer trees overlap the ones
     // behind (depth); each sprite's BASE anchors near the cell's lower-centre and
     // the canopy rises up; growth × treeScale sizes each tree.
+    if (treeGPU) {
+        renderTreesGPU(w, h, cell, vw, vh);
+    } else {
     if (!treeLayerCanvas) {
         treeLayerCanvas = document.createElement("canvas");
         treeLayerCtx    = treeLayerCanvas.getContext("2d");
@@ -5010,6 +5200,7 @@ function render() {
     treeLayerCountdown--;
     treePrevCamX = camX; treePrevCamY = camY;
     drawWorldLayer(treeLayerCanvas, camX, camY, vw, vh);
+    }   // end 2D cached-canopy path
 
     // Lightning afterglow (under fire, on top of trees)
     drawLightningGlows();
