@@ -510,7 +510,15 @@ function initGlowGL() {
         gl.blendFunc(gl.ONE, gl.ONE);          // premultiplied additive
         gl.clearColor(0, 0, 0, 0);
         // Lose-context safety: drop back to the 2D glow if the GPU context dies.
-        gc.addEventListener("webglcontextlost", (e) => { e.preventDefault(); glowGPU = false; });
+        // If the GPU context dies (driver TDR/reset, common on Windows) the WHOLE
+        // shared context is gone — drop glow AND trees back to 2D for the session and
+        // resize the 2D fallback canvases (the GPU path had shrunk the glow buffer to
+        // 1×1 and skipped the tree canvas). We don't try to restore — 2D is complete.
+        gc.addEventListener("webglcontextlost", (e) => {
+            e.preventDefault();
+            glowGPU = false; treeGPU = false;
+            try { resize(); } catch (_) {}
+        });
 
         glGlow = { canvas: gc, gl, prog, locs, quadBuf, quadBuf01, instBuf, ext, tex };
         glowGPU = true;
