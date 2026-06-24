@@ -418,9 +418,17 @@ let glowHalf = null, glowHalfCtx = null; // half-res scratch for the glow blur
 // back to the 2D path below — same look, just CPU-bound (the original behaviour).
 let glowGPU = false;          // true once the GL glow is live
 let glGlow = null;            // { canvas, gl, prog, locs, quadBuf, instBuf, ext }
-let glowInst = new Float32Array(4096 * 8);   // interleaved instance data (grows)
-let glowInstCount = 0;        // blobs queued this frame
 const GLOW_INST_FLOATS = 8;   // center.xy, radius.xy, color.rgb, alpha
+// Three instance lists, all drawn through the same instanced program:
+//  • glowInst  — the fire glow, emitted in WORLD px (rendered over the fire bbox).
+//  • fxInst    — flame plumes / sparks / embers, emitted in SCREEN px (additive).
+//  • smokeInst — smoke puffs, emitted in SCREEN px (alpha-blended).
+// The fx/smoke lists are screen-space so they bound naturally to the viewport and
+// set up the eventual full-scene GPU path.
+let glowInst = new Float32Array(4096 * 8); let glowInstCount = 0;
+let fxInst = new Float32Array(4096 * 8);   let fxInstCount = 0;
+let smokeInst = new Float32Array(2048 * 8); let smokeInstCount = 0;
+let emit2DCtx = null;         // which 2D ctx the *fallback* emitters draw into
 
 function initGlowGL() {
     if (glGlow || glowGPU) return;            // already tried
@@ -529,9 +537,57 @@ function emitGlow(cx, cy, rx, ry, R, G, B, A) {
     }
 }
 
-// Upload the queued blobs and issue ONE instanced draw covering the fire's
-// bounding box [ox,oy,vw,vh] (world px). Returns the GL canvas for compositing.
-function flushGlowGL(ox, oy, vw, vh) {
+// Screen-space additive flame effects (plume segs, sparks, embers). GPU packs a
+// screen-px instance into fxInst; 2D draws straight onto emit2DCtx (the original
+// 'lighter' path). World point (cx,cy) → screen via the camera + view-zoom.
+function emitFx(cx, cy, rx, ry, R, G, B, A) {
+    if (A <= 0) return; if (A > 1) A = 1;
+    if (glowGPU) {
+        if ((fxInstCount + 1) * GLOW_INST_FLOATS > fxInst.length) {
+            const n = new Float32Array(fxInst.length * 2); n.set(fxInst); fxInst = n;
+        }
+        const z = viewZoom, sx = (cx - camX) * z, sy = (cy - camY) * z;
+        let o = fxInstCount * GLOW_INST_FLOATS;
+        fxInst[o] = sx; fxInst[o + 1] = sy; fxInst[o + 2] = rx * z; fxInst[o + 3] = ry * z;
+        fxInst[o + 4] = R / 255; fxInst[o + 5] = G / 255; fxInst[o + 6] = B / 255; fxInst[o + 7] = A;
+        fxInstCount++;
+    } else {
+        const c = emit2DCtx;
+        c.globalAlpha = A > 1 ? 1 : A;
+        c.fillStyle = rgbQ(R, G, B);
+        c.beginPath();
+        if (rx === ry) c.arc(cx, cy, rx, 0, 6.2831853);
+        else c.ellipse(cx, cy, rx, ry, 0, 0, 6.2831853);
+        c.fill();
+    }
+}
+
+// Screen-space alpha-blended smoke puff. GPU packs into smokeInst; 2D draws onto
+// emit2DCtx with the alpha already applied (source-over, the original path).
+function emitSmoke(cx, cy, r, R, G, B, A) {
+    if (glowGPU) {
+        if ((smokeInstCount + 1) * GLOW_INST_FLOATS > smokeInst.length) {
+            const n = new Float32Array(smokeInst.length * 2); n.set(smokeInst); smokeInst = n;
+        }
+        const z = viewZoom, sx = (cx - camX) * z, sy = (cy - camY) * z;
+        let o = smokeInstCount * GLOW_INST_FLOATS;
+        smokeInst[o] = sx; smokeInst[o + 1] = sy; smokeInst[o + 2] = r * z; smokeInst[o + 3] = r * z;
+        smokeInst[o + 4] = R / 255; smokeInst[o + 5] = G / 255; smokeInst[o + 6] = B / 255; smokeInst[o + 7] = A;
+        smokeInstCount++;
+    } else {
+        const c = emit2DCtx;
+        c.globalAlpha = A;
+        c.fillStyle = rgbQ(R, G, B);
+        c.beginPath();
+        c.arc(cx, cy, r, 0, 6.2831853);
+        c.fill();
+    }
+}
+
+// Upload one instance list and issue a SINGLE instanced draw into the GL canvas,
+// over the box [ox,oy,vw,vh] (world px for glow, screen px for fx/smoke). `additive`
+// picks the blend (ONE,ONE) vs premultiplied source-over (smoke). Returns the canvas.
+function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     const g = glGlow, gl = g.gl, L = g.locs, ext = g.ext;
     // Pre-sized at resize() to viewport+margin; clamp (never resize the drawing
     // buffer here — a mid-run realloc would hitch). At worst the extreme edge of a
@@ -542,9 +598,10 @@ function flushGlowGL(ox, oy, vw, vh) {
     gl.viewport(0, H - vh, vw, vh);            // render into the TOP-left vw×vh (display space)
     gl.disable(gl.SCISSOR_TEST);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    if (glowInstCount === 0) return g.canvas;
+    if (count === 0) return g.canvas;
 
     gl.useProgram(g.prog);
+    gl.blendFunc(gl.ONE, additive ? gl.ONE : gl.ONE_MINUS_SRC_ALPHA);
     gl.uniform2f(L.uOrigin, ox, oy);
     gl.uniform2f(L.uViewport, vw, vh);
     gl.activeTexture(gl.TEXTURE0);
@@ -557,7 +614,7 @@ function flushGlowGL(ox, oy, vw, vh) {
     ext.vertexAttribDivisorANGLE(L.aCorner, 0);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, g.instBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, glowInst.subarray(0, glowInstCount * GLOW_INST_FLOATS), gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, inst.subarray(0, count * GLOW_INST_FLOATS), gl.DYNAMIC_DRAW);
     const STR = GLOW_INST_FLOATS * 4;
     const bind = (loc, size, off) => {
         gl.enableVertexAttribArray(loc);
@@ -568,9 +625,10 @@ function flushGlowGL(ox, oy, vw, vh) {
     bind(L.aRadius, 2, 8);
     bind(L.aColor, 3, 16);
     bind(L.aAlpha, 1, 28);
-    ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, glowInstCount);
+    ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, count);
     return g.canvas;
 }
+function flushGlowGL(ox, oy, vw, vh) { return glDrawInstanced(glowInst, glowInstCount, ox, oy, vw, vh, true); }
 let hazeCanvas = null, hazeCtx = null;   // scratch buffer for heat-shimmer distortion
 let treeSprites = null;
 let grassSprites = null;
@@ -5182,9 +5240,13 @@ function render() {
     // by "kind" (standard / tall-wispy / wide-squat / curly) and the tip curls
     // sideways with wind, so the fire looks alive and varied. Colour ramps deep
     // red base → orange → yellow → white-hot tip (blue-white at the hottest cores).
+    // GPU: plumes+sparks+embers share one screen-space additive list (reset here,
+    // composited once after embers).
+    if (glowGPU) fxInstCount = 0;
     if (flamePlumes.length) {
-        ctx.save();
-        ctx.globalCompositeOperation = "lighter";
+        // GPU: emit screen-space additive instances (composited in one pass after
+        // embers). 2D: draw straight onto ctx in 'lighter' mode (the original path).
+        if (!glowGPU) { ctx.save(); ctx.globalCompositeOperation = "lighter"; emit2DCtx = ctx; }
         const SEGS = 5;
         const windLean = Math.cos(windAngle) * props.windStrength;
         for (const p of flamePlumes) {
@@ -5230,20 +5292,15 @@ function render() {
                     b = (6 + Math.pow(t, 2.6) * 215 + hot * 70) | 0;
                     if (g > 255) g = 255; if (b > 255) b = 255;
                 }
-                ctx.fillStyle = rgbQ(r, g, b);
-                ctx.globalAlpha = segAlpha > 1 ? 1 : segAlpha;
-                ctx.beginPath();
-                ctx.arc(segX, segY, segR, 0, Math.PI * 2);
-                ctx.fill();
+                emitFx(segX, segY, segR, segR, r, g, b, segAlpha);
             }
         }
-        ctx.restore();
+        if (!glowGPU) ctx.restore();
     }
 
     // Crackling sparks — tiny bright pinpoints that pop off the fire and arc
     if (sparks.length) {
-        ctx.save();
-        ctx.globalCompositeOperation = "lighter";
+        if (!glowGPU) { ctx.save(); ctx.globalCompositeOperation = "lighter"; emit2DCtx = ctx; }
         for (const p of sparks) {
             const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
@@ -5253,47 +5310,53 @@ function render() {
             // at the spreading front when a fire starts.)
             if (p.ph === undefined) p.ph = Math.random() * 6.2831853;
             const tw = 0.74 + 0.26 * Math.sin(renderTimeSec * 7 + p.ph);
-            ctx.fillStyle = rgbQ(255, (220 + a * 35) | 0, (140 * a) | 0);
-            ctx.globalAlpha = a * tw;
-            ctx.beginPath();
-            ctx.arc(px, py, p.size, 0, Math.PI * 2);
-            ctx.fill();
+            emitFx(px, py, p.size, p.size, 255, (220 + a * 35) | 0, (140 * a) | 0, a * tw);
         }
-        ctx.restore();
+        if (!glowGPU) ctx.restore();
     }
 
     // Embers — glowing floating motes: a soft warm halo + comet trail + bright,
     // gently-pulsing core, so they drift like living sparks of light.
     if (embers.length) {
-        ctx.save();
-        ctx.globalCompositeOperation = "lighter";
-        ctx.lineCap = "round";
+        if (!glowGPU) { ctx.save(); ctx.globalCompositeOperation = "lighter"; ctx.lineCap = "round"; emit2DCtx = ctx; }
         for (const p of embers) {
             const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
             const tw = 0.75 + 0.25 * Math.sin((p.phase || 0) + renderTimeSec * 6.5); // soft slow pulse
             // soft glow halo
-            ctx.fillStyle = rgbQ(255, (130 + a * 70) | 0, (40 * a) | 0);
-            ctx.globalAlpha = a * 0.16 * tw;
-            ctx.beginPath();
-            ctx.arc(px, py, p.size * 3.4, 0, Math.PI * 2);
-            ctx.fill();
-            // comet trail
-            ctx.lineWidth = p.size * 0.9;
-            ctx.strokeStyle = rgbQ(255, (120 + a * 100) | 0, (20 * a) | 0);
-            ctx.globalAlpha = a * 0.45;
-            ctx.beginPath();
-            ctx.moveTo(px - p.vx * 2.4, py - p.vy * 2.4);
-            ctx.lineTo(px, py);
-            ctx.stroke();
+            emitFx(px, py, p.size * 3.4, p.size * 3.4, 255, (130 + a * 70) | 0, (40 * a) | 0, a * 0.16 * tw);
+            // comet trail — GPU: a short stack of fading blobs along -velocity
+            // (instancing has no line primitive); 2D: the original round stroke.
+            if (glowGPU) {
+                for (let tt = 0; tt < 1.001; tt += 0.5) {
+                    emitFx(px - p.vx * 2.4 * (1 - tt), py - p.vy * 2.4 * (1 - tt),
+                           p.size * 0.55, p.size * 0.55, 255, (120 + a * 100) | 0, (20 * a) | 0, a * 0.32);
+                }
+            } else {
+                ctx.lineWidth = p.size * 0.9;
+                ctx.strokeStyle = rgbQ(255, (120 + a * 100) | 0, (20 * a) | 0);
+                ctx.globalAlpha = a * 0.45;
+                ctx.beginPath();
+                ctx.moveTo(px - p.vx * 2.4, py - p.vy * 2.4);
+                ctx.lineTo(px, py);
+                ctx.stroke();
+            }
             // bright core
-            ctx.fillStyle = rgbQ(255, (225 + a * 30) | 0, (160 * a) | 0);
-            ctx.globalAlpha = a * tw > 1 ? 1 : a * tw;
-            ctx.beginPath();
-            ctx.arc(px, py, p.size, 0, Math.PI * 2);
-            ctx.fill();
+            emitFx(px, py, p.size, p.size, 255, (225 + a * 30) | 0, (160 * a) | 0, a * tw);
         }
-        ctx.restore();
+        if (!glowGPU) ctx.restore();
+    }
+
+    // GPU: one additive instanced draw composites glow's siblings — plume tongues,
+    // sparks and embers (all queued in screen-space fxInst above) — over the scene.
+    if (glowGPU && fxInstCount > 0) {
+        const fxc = glDrawInstanced(fxInst, fxInstCount, 0, 0, w, h, true);
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = "lighter";
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(fxc, 0, 0, w, h, 0, 0, w, h);
+        ctx.restore();   // back to the world transform
     }
 
     // Heat-shimmer distortion — over (and rising above) a sizable fire, snapshot
@@ -5337,31 +5400,38 @@ function render() {
 
     // Smoke (above fire, below leaves) — sooty/dark at the base, lightening as it
     // rises, with a billowing second lobe on the larger puffs.
+    if (glowGPU) smokeInstCount = 0;
     if (props.showSmoke && smokeParticles.length) {
-        ctx.save();
+        if (!glowGPU) { ctx.save(); emit2DCtx = ctx; }
         for (const p of smokeParticles) {
             const px = drawX(p), py = drawY(p);
             let s = (p.shade | 0) + (((1 - p.life) * 70) | 0);   // lighten with age
             if (s > 235) s = 235;
-            ctx.fillStyle = rgbQ(s, (s * 0.95) | 0, (s * 0.88) | 0);
-            ctx.globalAlpha = p.life * 0.14;
-            ctx.beginPath();
-            ctx.arc(px, py, p.size, 0, Math.PI * 2);
-            ctx.fill();
-            // Billow lobe — the secondary smoke blob. Under load, draw it every other
-            // frame (per-particle phase so it's not a synchronized flicker) — halves
-            // smoke fill-rate and is imperceptible at speed.
+            const sg = (s * 0.95) | 0, sb = (s * 0.88) | 0;
+            emitSmoke(px, py, p.size, s, sg, sb, p.life * 0.14);
+            // Billow lobe — the secondary smoke blob. Under load (2D only), draw it
+            // every other frame (per-particle phase so it's not a synchronized
+            // flicker) — halves smoke fill-rate and is imperceptible at speed.
             if (p.size > 6 && p.swirl !== undefined
-                && (perfQuality > 0.55 || ((frame + (p.shade & 1)) & 1) === 0)) {  // billow lobe
-                ctx.globalAlpha = p.life * 0.09;
-                ctx.beginPath();
-                ctx.arc(px + Math.cos(p.swirl) * p.size * 0.55,
-                        py - Math.abs(Math.sin(p.swirl)) * p.size * 0.45,
-                        p.size * 0.66, 0, Math.PI * 2);
-                ctx.fill();
+                && (glowGPU || perfQuality > 0.55 || ((frame + (p.shade & 1)) & 1) === 0)) {
+                emitSmoke(px + Math.cos(p.swirl) * p.size * 0.55,
+                          py - Math.abs(Math.sin(p.swirl)) * p.size * 0.45,
+                          p.size * 0.66, s, sg, sb, p.life * 0.09);
             }
         }
-        ctx.restore();
+        if (!glowGPU) ctx.restore();
+        // GPU: one alpha-blended instanced draw composites all the smoke over the scene.
+        if (glowGPU && smokeInstCount > 0) {
+            const smc = glDrawInstanced(smokeInst, smokeInstCount, 0, 0, w, h, false);
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.imageSmoothingEnabled = true;
+            // Soft sprite spreads the puff vs a hard 2D disc; boost composite alpha
+            // to keep the same smoke density.
+            ctx.globalAlpha = 1;
+            ctx.drawImage(smc, 0, 0, w, h, 0, 0, w, h);
+            ctx.restore();
+        }
     }
 
     // Daytime insects — butterflies (coloured fluttering wings) + dragonflies
