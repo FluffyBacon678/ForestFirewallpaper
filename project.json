@@ -19,13 +19,13 @@
                 "order":  1,
                 "text":   "Quality preset",
                 "type":   "combo",
-                "value":  "auto",
+                "value":  "high",
                 "options": [
-                    { "label": "Auto (match your GPU — recommended)",       "value": "auto"   },
                     { "label": "Low (40% particles, mobile/iGPU friendly)", "value": "low"    },
                     { "label": "Medium (70% particles, balanced)",          "value": "medium" },
                     { "label": "High (100% particles, default)",            "value": "high"   },
-                    { "label": "Ultra (160% particles, for beefy GPUs)",    "value": "ultra"  }
+                    { "label": "Ultra (160% particles, for beefy GPUs)",    "value": "ultra"  },
+                    { "label": "Auto (try to match your GPU)",              "value": "auto"   }
                 ]
             },
             "fpsCap": {

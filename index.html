@@ -97,7 +97,7 @@ const props = {
     rgbEdgeMode:       true,
     rgbEdgeStrength:   0.7,
     // Performance
-    quality:           "auto",
+    quality:           "high",
     fpsCap:            "120",
     // Audio reactivity (Wallpaper Engine system audio)
     audioReactive:     true,
@@ -5284,11 +5284,22 @@ function render() {
         // water firelight) and, for a huge blaze, even some MAIN flames are limited
         // to a STABLE per-cell subset (neighbours' enlarged glow hides the gaps).
         // burningCount is quantized so the subset doesn't churn frame-to-frame
-        // (which would itself flicker). On the GPU path all of this is a SINGLE
-        // instanced draw, so we keep every cell + every layer — full quality.
+        // (which would itself flicker). The GPU keeps full quality far longer (it's
+        // one instanced draw), but a SCREEN-FILLING blaze is still tens of thousands
+        // of large additive blobs — a fill-rate wall even on a good card — so it
+        // limits the extra layers / coarsens cells too, just at much higher
+        // thresholds the governor pulls in further when frames start to slip.
         const glowQ = Math.round(burningCount / 128) * 128;
-        const glowExtraFrac = glowGPU ? 1 : (glowQ > 380 ? 380 / glowQ : 1);
-        const glowCellFrac  = glowGPU ? 1 : (glowQ > 1000 ? Math.max(0.45, 1000 / glowQ) : 1);
+        let glowExtraFrac, glowCellFrac;
+        if (glowGPU) {
+            const head = 0.45 + 0.55 * perfQuality;     // 1.0 smooth → ~0.45 under load
+            const extraT = 3500 * head, cellT = 9000 * head;
+            glowExtraFrac = glowQ > extraT ? extraT / glowQ : 1;
+            glowCellFrac  = glowQ > cellT ? Math.max(0.40, cellT / glowQ) : 1;
+        } else {
+            glowExtraFrac = glowQ > 380 ? 380 / glowQ : 1;
+            glowCellFrac  = glowQ > 1000 ? Math.max(0.45, 1000 / glowQ) : 1;
+        }
         const glowSizeBoost = glowCellFrac < 1 ? 1 / Math.sqrt(glowCellFrac) : 1;
         for (let y = vy0; y <= vy1; y++) {
             const rowBase = y * cols;
