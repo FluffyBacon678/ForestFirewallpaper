@@ -1,12 +1,12 @@
 {
     "title": "Forest Wildfire",
-    "description": "An interactive top-down wildfire wallpaper. Click anywhere to spark a fire — flames spread through grass and trees with the wind, embers fly, smoke billows, lightning strikes during storms, rain extinguishes flames, and the forest slowly regrows. Procedurally generated terrain (4 tree species, ponds, rivers, dirt paths, rocks, elevation shading, lily pads), weather cycles (clear / cloudy / rain / storm), and full RGB lighting sync for iCUE / Aura / Razer Chroma / Razer Synapse.",
+    "description": "An interactive top-down wildfire wallpaper. Click anywhere to spark a fire — flames spread through grass and trees with the wind, embers fly, smoke billows, lightning strikes during storms, rain extinguishes flames, and the forest slowly regrows. Procedurally generated terrain (9 tree species, 59 ground-cover types, ponds, rivers, dirt paths, rocks, elevation shading, lily pads), a four-season year, six weather types (drought → clear → cloudy → rain → monsoon → storm), and full RGB lighting sync for iCUE / Aura / Razer Chroma / Synapse. GPU-accelerated rendering — the fire glow, flame/ember/smoke effects and the whole tree canopy draw as instanced WebGL, with an automatic 2D fallback — so it stays smooth from integrated graphics up to high-refresh 4K/5K, even with the screen on fire.",
     "type": "web",
     "file": "index.html",
     "preview": "preview.jpg",
     "tags": ["Nature", "Interactive", "Relaxing", "Pixel art"],
     "visibility": "public",
-    "version": 3,
+    "version": 4,
     "general": {
         "properties": {
 

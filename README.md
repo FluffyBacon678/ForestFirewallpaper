@@ -192,88 +192,108 @@ Features:
 
 ## Performance
 
-Comfortable at 60 / 120 / 144 fps on modest hardware. The wallpaper defaults to
-a 120 fps cap so high-refresh desktops get smoother motion, while the sim keeps
-fire spread, weather, regrowth and particle lifetimes at the same gameplay pace.
+Built **GPU-first**: Wallpaper Engine runs mostly on gaming rigs, so the heavy,
+per-frame drawing is offloaded to the graphics card and the CPU is left to do
+what it's good at — simulate the fire. The CPU runs the cellular-automaton fire
+sim and packs compact buffers; the GPU draws everything else.
 
-Measured frame times (1.5× world, ~1080p): **idle forest ~3.3 ms**, an active
-wildfire ~4.7 ms, a calm forest with no wind ~1.6 ms, and a worst-case 700+ cell
-inferno ~9 ms — all inside the 120 fps budget, with most of the day spent far
-under it. Sim ticks run in well under 0.2 ms.
+The wallpaper defaults to a 120 fps cap so high-refresh desktops get smoother
+motion, while the sim keeps fire spread, weather, regrowth and particle lifetimes
+at the same gameplay pace regardless of frame rate.
 
-### 4K / high-DPI & frame pacing
+### GPU-accelerated rendering (instanced WebGL, with a 2D fallback)
 
-The biggest cost is redrawing the swaying tree canopy, which scales with the
-number of on-screen trees. Two things keep it smooth at 4K:
+The three things that used to dominate the frame — the **fire glow**, the
+**dynamic fire effects** (flame tongues, sparks, embers, smoke) and the **entire
+tree canopy** — are now each a **single instanced WebGL draw call** instead of
+thousands of individual 2D fills. A screen-filling blaze that once submitted tens
+of thousands of draw calls from one CPU core (the old stutter wall) is now a
+handful of GPU draws, composited over the 2D terrain.
 
-- **"Scale detail with resolution"** (on by default) grows the internal cell size
-  with the display, so a 4K screen renders the same physical tree size and density
-  as 1080p (≈¼ the trees) instead of 4× of everything rendered microscopically.
-  Turn it off for true-pixel 4K (much heavier).
-- **Amortized tree rebuild** — the canopy is refreshed **one horizontal band per
-  frame** (clipped, redrawing any tree whose canopy reaches into the band) rather
-  than the whole window at once, so there's no periodic rebuild spike. Tree
-  changes (burn/sprout) ride the same banded path. Result: even on a weak GPU at
-  4K, an active wildfire holds a flat ~9 ms/frame with no hitches; on the target
-  RTX 2070 it's well under the 60 fps budget at every resolution.
+- **Glow + effects** — every flame blob is packed into one buffer and drawn as a
+  soft additively-blended sprite (its falloff *is* the bloom, so there's no
+  separate blur pass). Smoke is a second alpha-blended pass.
+- **Trees** — the whole canopy is one instanced textured-quad draw from a pre-baked
+  size/variant atlas; **sway, growth and the burning-tree char/shrink are
+  per-instance**. This replaced the old cached-canvas canopy that had to be
+  *rebuilt* in bands as the trees swayed — the rebuild was the source of the 4K/5K
+  frame-time spikes, and it's gone (no world-sized tree canvas to rebuild or keep
+  in RAM either).
+- **Guarded fallback** — every GPU path is feature-detected and falls straight
+  back to the original 2D renderer if WebGL or instancing is unavailable, **and on
+  GPU context loss** (driver TDR/reset, common on Windows) it drops cleanly to 2D
+  for the session. Same look either way; the 2D path is the proven original code.
 
-Other 4K levers: raise **Zoom**, drop **Quality preset** to Medium/Low (Low also
-widens the rebuild bands and drops the fire-glow bloom), or lower **Tree density**
-/ **Map size**.
+### Adaptive quality & GPU matching
 
-Key optimizations:
-- **Two-tier baked layers**: the worldgen-static terrain (dirt, smooth water,
-  paths, lily pads, rocks, grass) is baked once per world; the per-fire static
-  (ash/scar) layer only refreshes its **visible window** (+ a pan margin), so a
-  wildfire's scar updates cost the same whether the world is 1080p or 4K
-- **Half-resolution water blur** — the one-time terrain bake builds the soft
-  shoreline mask at half-res and upscales it, cutting the worldgen/resize/zoom
-  hitch substantially (the blur was its single biggest cost)
-- **Visible-region tree layer** — the swaying-tree layer only re-renders the
-  on-screen window (+ a pan margin), not the whole oversized world, and blits
-  trees 1:1 from a pre-scaled 20-bucket size atlas instead of scaling every
-  drawImage (this alone cut typical frame time ~4×, and integer-snapped blits
-  render the pixel-art trees crisper too)
-- **Event-driven tree refreshes** — the sway is sampled from a 320-entry table
-  every 2nd frame; when the wind is calm the layer only rebuilds on an actual
-  change (a tree burns down, a sapling sprouts, the camera moves), so a still
-  forest costs almost nothing to redraw
-- **Visible-window effect passes** — fire glow, ash smoulder glow and water
-  sparkles scan/draw only the on-screen cells; off-screen fire still simulates
-  but costs no draw time
-- **No per-frame string garbage** — the thousands of flame/ember/smoke/glow
-  fills reuse interned `rgb()` strings (colour quantized to 16 levels, exact
-  opacity via `globalAlpha`) instead of building `rgba(…)` strings every draw,
-  eliminating the GC pauses that caused periodic micro-stutters
-- **Pooled particles** — the two highest-volume systems (smoke, embers) recycle
-  dead objects through a free-list instead of allocating fresh ones each spawn,
-  so a roaring fire (hundreds of spawns/sec) adds almost nothing to the young-gen
-  GC over a long run
-- **Prebuilt glow sprites** — cloud shadows and mushroom halos blit a once-baked
-  soft-radial canvas (tinted via `globalAlpha`) instead of building a fresh
-  `createRadialGradient` every frame — faster *and* allocation-free
-- **Staggered heavy rebuilds** — a static-scar rebuild and a swaying-tree band
-  never run on the same frame (the band yields one frame, invisible at the sway
-  rate), so the two biggest periodic jobs can't collide into a spike
+- **Quality preset** defaults to **High** and can be set to Low / Medium / High /
+  Ultra, or **Auto** — which reads the GPU from the WebGL renderer string and picks
+  a tier (RTX / modern Radeon / Arc → Ultra, GTX 10/16-series → High, integrated →
+  Medium, software raster → Low).
 - **Adaptive frame-budget governor** — watches the smoothed frame time and, *only*
-  when frames run long for a sustained stretch, trims the cheapest-to-lose detail
-  (water-sparkle count, smoke billow-lobe cadence, glow-blur radius) then restores
-  the instant there's headroom. Capable hardware always runs full quality; a weak
-  GPU gets a 60 fps floor with a near-invisible (~0.75 % mean-pixel) trade
-- **Half-resolution fire-glow blur** — the bloom is blurred at half size and
-  upscaled, a quarter of the blur work for the same soft glow
-- **Strided regrowth** — the full-grid ash/regrowth pass visits ¼ of the cells
-  per tick at 4× rates (statistically identical, quarter the scan cost)
-- Opaque (`alpha:false`) main canvas + the world-sized scratch canvas kept out
-  of the DOM compositor entirely
-- Fixed-timestep simulation decoupled from render rate, with render
-  interpolation for moving particles/fish/birds/rain/smoke
-- In-place particle compaction (no `kept = []` allocations per frame)
-- Sprite atlases for trees, grass, rocks; static rebuilds throttled
+  when frames run long for a sustained stretch, trims the cheapest-to-lose detail.
+  This is the robust "auto" that works on **any** GPU regardless of vendor string:
+  capable hardware always runs full quality; a weak GPU under a max blaze sheds
+  gracefully and recovers the instant there's headroom.
+- **Max-fire glow LOD** — a *screen-filling* inferno is still tens of thousands of
+  large additive blobs (a fill-rate wall even for one draw call), so above a high
+  cell-count threshold the GPU limits the invisible extra glow layers and coarsens
+  the main flame (neighbours' enlarged glow keeps it seamless), pulled in further
+  by the governor when frames slip. Normal and even large fires are untouched —
+  full quality.
 
-If you're on a weaker GPU, drop **Quality preset** to Medium (70% particles) or
-Low (40% particles + several effects disabled). Use **Max FPS** = 30/60 for battery
-laptops.
+### Measured frame times
+
+Real hardware (GTX 1050 Ti, the weakest target; render time, sim is separate):
+
+| Scene | Render |
+|---|---|
+| Normal wildfire, 1080p–1440p | ~1–4 ms |
+| Big fire, 4K | ~5–8 ms |
+| **Screen-filling inferno, 4K** (~17k burning cells) | **~4.6 ms median, flat** (no spikes) |
+| 5K, active fire | ~6.5 ms |
+
+The fixed-timestep sim adds a few ms that scales with *total* live fire (≈8 ms at
+an absolute screen-filling max); normal fires are a fraction of that. Net: 120 fps
+on normal/large fires across resolutions, comfortably 60 fps+ even at a 4K/5K
+screen-filling extreme. Validated by a pre-upload smoke test: no errors across
+1080p→5K / ultrawide / portrait, both render paths, all presets, all
+seasons/weather, no flicker, stable memory (instance buffers and particle pools
+plateau — no leak), and clean recovery from a forced WebGL context loss.
+
+### RAM
+
+The cached ground layers (terrain / water / paths / ash) are world-sized; their
+area is capped (~64 MP) so a large **Map size** at 4K/5K can't exhaust memory, and
+on the GPU path the now-unused 2D glow/tree canvases aren't allocated. Comfortable
+on the 16 GB+ machines this targets.
+
+### Other levers & CPU-side optimizations
+
+4K levers if you want even more headroom: raise **Zoom**, drop **Quality preset**,
+or lower **Tree density** / **Map size**. **"Scale detail with resolution"** (on by
+default) grows the internal cell size with the display so a 4K screen renders the
+same physical density as 1080p instead of 4× the work.
+
+- **Two-tier baked terrain** — the worldgen-static ground (dirt, smooth water,
+  paths, lily pads, rocks, grass) is baked once per world; the per-fire ash/scar
+  layer only refreshes its **visible window** (+ a pan margin), so scar updates
+  cost the same at 1080p or 4K. Half-resolution shoreline blur cuts the bake hitch.
+- **No per-frame string garbage** — the flame/ember/smoke fills reuse interned
+  `rgb()` strings (colour quantized to 16 levels, exact opacity via `globalAlpha`)
+  instead of building `rgba(…)` strings every draw, eliminating GC micro-stutters.
+- **Pooled particles** — smoke and embers recycle dead objects through a free-list
+  instead of allocating per spawn, so a roaring fire adds almost nothing to GC.
+- **Strided regrowth** — the ash/regrowth grid pass visits ¼ of the cells per tick
+  at 4× rates (statistically identical, a quarter of the scan cost).
+- **Time-based pacing** — sway, sparkle and rebuild cadences are gated by
+  wall-clock time, not frame count, so a 144/240 Hz display doesn't pay 2–4× for
+  motion it can't perceive between frames.
+- Fixed-timestep simulation decoupled from render rate, with render interpolation
+  for moving particles/fish/birds/rain/smoke; in-place particle compaction.
+
+If you're on a weaker GPU, leave Quality on **Auto** (or drop to **Medium**), and
+use **Max FPS** = 30/60 for battery laptops.
 
 ## Files
 
@@ -337,7 +357,7 @@ Organized into sections in the Wallpaper Engine picker:
 
 | Section | Properties |
 |---|---|
-| Performance | Quality preset (Low/Medium/High/Ultra), Max FPS, Scale detail with resolution (4K) |
+| Performance | Quality preset (Auto/Low/Medium/High/Ultra — Auto matches your GPU), Max FPS, Scale detail with resolution (4K) |
 | Terrain | Tree density (lushness), Tree size, Grass density, Rock density, Zoom (smaller = more zoomed out / lusher), Rivers, Lily pads, Paths, Rocks, Elevation shading |
 | Fire | Spread rate, Tree burn duration, Grass burn duration, Fire glow, Flame plumes, Embers, Smoke |
 | Wind | Wind strength, Wind rotation speed, Wind streaks, Drifting leaves |
