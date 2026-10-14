@@ -271,6 +271,17 @@ pre-upload smoke test: no errors across
 seasons/weather, no flicker, stable memory (instance buffers and particle pools
 plateau — no leak), and clean recovery from a forced WebGL context loss.
 
+### Start-up & scaled displays
+
+- **Fast load** — Wallpaper Engine hands over every setting at once on load; the
+  world is now generated **once** for the whole batch (it used to be ~9 times,
+  ~8 s of frozen screen at 4K), and the ground texture is rasterised directly
+  instead of via ~550k canvas calls. A 4K load now builds the world in ~0.3 s.
+  Resizes are debounced, and a hidden / 0×0 viewport no longer wipes the world.
+- **Native resolution on scaled displays** — on a 4K monitor at 150–200% Windows
+  scaling the wallpaper renders at full device resolution (devicePixelRatio
+  aware) instead of half-resolution stretched; pointer input is mapped to match.
+
 ### RAM
 
 The cached ground layers (terrain / water / paths / ash) are world-sized; their
