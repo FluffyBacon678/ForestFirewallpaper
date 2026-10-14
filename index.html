@@ -6465,6 +6465,7 @@ window.addEventListener("resize", () => {
 // (a NaN spread rate never ignites; NaN wind sends every particle to NaN coordinates
 // for good). Keep the previous value instead.
 function finiteOr(v, prev) {
+    if (v === "" || v === null || typeof v === "boolean") return prev;   // Number() would make these 0/1
     const n = Number(v);
     return Number.isFinite(n) ? n : prev;
 }
