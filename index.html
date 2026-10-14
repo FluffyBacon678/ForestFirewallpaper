@@ -2931,6 +2931,22 @@ function rebuildGrid() {
     spawnFish();
     spawnCritters();
     markTerrainDirty();
+    // A regeneration during start-up (WE's first property batch, a resize) wipes the
+    // world — and with it the starter fire, which was a fixed 200 ms timer that could
+    // land before them. Re-arm it so exactly one starter fire survives.
+    if (performance.now() - bootMs < 10000) scheduleStarterFire();
+}
+
+// Starter fire so the wallpaper opens with visible action — one pending timer;
+// re-scheduling cancels it, so a burst of start-up regenerations yields one fire.
+let bootMs = 0, starterTimer = 0;
+function scheduleStarterFire() {
+    if (!props.seedFireOnStart) return;
+    clearTimeout(starterTimer);
+    starterTimer = setTimeout(() => {
+        // near the world centre (roughly where the default camera looks)
+        igniteAt(worldPxW * (0.4 + Math.random() * 0.2), worldPxH * (0.4 + Math.random() * 0.2), 2);
+    }, 300);
 }
 
 function resize() {
@@ -6386,7 +6402,20 @@ canvas.addEventListener("mouseleave", () => { mouseInside = false; mouseDown = f
 canvas.addEventListener("mouseenter", e => { mouseInside = true; mouseX = e.clientX; mouseY = e.clientY; });
 canvas.addEventListener("touchstart", e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
 canvas.addEventListener("touchmove",  e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
-window.addEventListener("resize", resize);
+// Every resize regenerates the world (~1 s at 4K), and browsers fire resize events
+// in bursts — so debounce, skip no-op events (same size), and ignore a 0×0 viewport
+// (wallpaper hidden / display asleep), which would otherwise throw away the world
+// and any fire in progress, then rebuild it again on wake.
+let resizeTimer = 0;
+window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+        const nw = window.innerWidth, nh = window.innerHeight;
+        if (nw < 2 || nh < 2) return;
+        if (nw === canvas.width && nh === canvas.height) return;
+        resize();
+    }, 150);
+});
 
 // ============================================================
 // Wallpaper Engine property listener
@@ -6441,12 +6470,13 @@ function applyProperty(key, raw) {
             break;
         case "treeScale":
             props.treeScale = Number(v);
-            buildScaledTreeAtlas();   // rebake the pre-scaled tree sizes
-            treeLayerCountdown = 0;
+            if (propBatch) propBatch.atlas = true;
+            else { buildScaledTreeAtlas(); treeLayerCountdown = 0; }   // rebake the pre-scaled tree sizes
             break;
         case "worldSize":
             props.worldSize = Math.max(1, Number(v) || 1);
-            resize();   // regenerate the (resized) world + camera bounds
+            if (propBatch) propBatch.resize = true;
+            else resize();   // regenerate the (resized) world + camera bounds
             break;
         case "autoIgnite":
         case "regrowth":
@@ -6521,13 +6551,28 @@ function applyProperty(key, raw) {
             break;
     }
 
+    if (propBatch) { propBatch.rebuild = propBatch.rebuild || needRebuild; propBatch.bg = propBatch.bg || needBg; return; }
     if (needRebuild) rebuildGrid();
     if (needBg) drawDirtBackground();
 }
 
+// Wallpaper Engine delivers properties in batches — at start-up, ALL of them in one
+// call. Each world-shaping property used to regenerate the whole world on its own
+// (densities, zoom, DPI, rivers, lily pads, paths, map size): ~9 full rebuilds,
+// ~8 s of frozen screen at 4K on every load. Collect them and regenerate ONCE.
+let propBatch = null;
 window.wallpaperPropertyListener = {
     applyUserProperties(properties) {
-        for (const key in properties) applyProperty(key, properties[key]);
+        propBatch = { rebuild: false, bg: false, resize: false, atlas: false };
+        let b;
+        try { for (const key in properties) applyProperty(key, properties[key]); }
+        finally { b = propBatch; propBatch = null; }
+        if (b.resize) resize();                      // resize() also rebuilds grid + background
+        else {
+            if (b.rebuild) rebuildGrid();            // (rebuildGrid re-bakes the tree atlas too)
+            if (b.bg) drawDirtBackground();
+            if (b.atlas && !b.rebuild) { buildScaledTreeAtlas(); treeLayerCountdown = 0; }
+        }
     },
     applyGeneralProperties() { },
 };
@@ -6555,19 +6600,11 @@ if (typeof window.wallpaperRegisterAudioListener === "function") {
 // ============================================================
 // Boot
 // ============================================================
+bootMs = performance.now();
 applyQuality(props.quality);   // provisional (pre-GL) tier
 applyFpsCap(props.fpsCap);
-resize();                      // builds the GL context…
+resize();                      // builds the GL context (and arms the starter fire)…
 resolveQuality();              // …so "auto" can now read the GPU class
-// Seed a starter fire so the wallpaper opens with visible action
-if (props.seedFireOnStart) {
-    setTimeout(() => {
-        // near the world centre (roughly where the default camera looks)
-        const x = worldPxW * (0.4 + Math.random() * 0.2);
-        const y = worldPxH * (0.4 + Math.random() * 0.2);
-        igniteAt(x, y, 2);
-    }, 200);
-}
 loop();
 </script>
 </body>
