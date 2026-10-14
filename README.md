@@ -230,8 +230,13 @@ handful of GPU draws, composited over the 2D terrain.
   Ultra, or **Auto** — which reads the GPU from the WebGL renderer string and picks
   a tier (RTX / modern Radeon / Arc → Ultra, GTX 10/16-series → High, integrated →
   Medium, software raster → Low).
-- **Adaptive frame-budget governor** — watches the smoothed frame time and, *only*
-  when frames run long for a sustained stretch, trims the cheapest-to-lose detail.
+- **Refresh-aware frame pacing** — the display's real refresh rate (or Wallpaper
+  Engine's own FPS limit) is learned from the vsync-aligned frame timestamps. The
+  **Max FPS** cap holds its average rate on any monitor (120 on a 144 Hz screen is
+  really 120, not 72), and is skipped when the cap is at or above the refresh.
+- **Adaptive frame-budget governor** — watches the smoothed frame time against what
+  the screen can actually deliver and, *only* when frames run long for a sustained
+  stretch, trims the cheapest-to-lose detail.
   This is the robust "auto" that works on **any** GPU regardless of vendor string:
   capable hardware always runs full quality; a weak GPU under a max blaze sheds
   gracefully and recovers the instant there's headroom.
