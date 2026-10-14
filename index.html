@@ -419,13 +419,17 @@ let glowHalf = null, glowHalfCtx = null; // half-res scratch for the glow blur
 let glowGPU = false;          // true once the GL glow is live
 let glGlow = null;            // { canvas, gl, prog, locs, quadBuf, instBuf, ext }
 const GLOW_INST_FLOATS = 8;   // center.xy, radius.xy, color.rgb, alpha
-// Three instance lists, all drawn through the same instanced program:
-//  • glowInst  — the fire glow, emitted in WORLD px (rendered over the fire bbox).
-//  • fxInst    — flame plumes / sparks / embers, emitted in SCREEN px (additive).
-//  • smokeInst — smoke puffs, emitted in SCREEN px (alpha-blended).
-// The fx/smoke lists are screen-space so they bound naturally to the viewport and
-// set up the eventual full-scene GPU path.
-let glowInst = new Float32Array(4096 * 8); let glowInstCount = 0;
+// Three instance lists, all drawn through the same instanced program, all in SCREEN
+// px (so they bound naturally to the viewport at any zoom):
+//  • glowInst  — the fire glow (additive; composited over the fire's screen bbox).
+//  • fxInst    — flame plumes / sparks / embers (additive, one draw).
+//                (Also borrowed briefly at the tree pass for spring blossom dabs.)
+//  • smokeInst — smoke puffs (alpha-blended).
+// Glow and flames stay in SEPARATE buffers on purpose: the Fire-glow slider (and Low
+// quality's dimmer glow) scales the glow buffer AFTER it saturates, which only a
+// separate composite can express. (At the default strength of 1.0 a merged buffer
+// would look identical — additive blends saturate the same either way.)
+let glowInst = new Float32Array(8192 * 8); let glowInstCount = 0;
 let fxInst = new Float32Array(4096 * 8);   let fxInstCount = 0;
 let smokeInst = new Float32Array(2048 * 8); let smokeInstCount = 0;
 let emit2DCtx = null;         // which 2D ctx the *fallback* emitters draw into
@@ -527,15 +531,19 @@ function initGlowGL() {
     }
 }
 
-// Queue one glow blob. GPU path packs an instance; 2D path draws it immediately
-// (bit-for-bit the original behaviour, so the fallback is the proven code).
+// Queue one glow blob. GPU path packs a SCREEN-space instance (world → screen via
+// the camera + zoom); it used to be world-space, which overflowed the viewport-sized
+// GL buffer when zoomed out and clipped the glow on the far side of the screen. The
+// 2D path draws it immediately (bit-for-bit the original, so the fallback is proven).
+let glowVisBurning = 0;       // burning cells on screen last frame (glow LOD input)
 function emitGlow(cx, cy, rx, ry, R, G, B, A) {
     if (glowGPU) {
         if ((glowInstCount + 1) * GLOW_INST_FLOATS > glowInst.length) {
             const n = new Float32Array(glowInst.length * 2); n.set(glowInst); glowInst = n;
         }
+        const z = viewZoom;
         let o = glowInstCount * GLOW_INST_FLOATS;
-        glowInst[o] = cx; glowInst[o + 1] = cy; glowInst[o + 2] = rx; glowInst[o + 3] = ry;
+        glowInst[o] = (cx - camX) * z; glowInst[o + 1] = (cy - camY) * z; glowInst[o + 2] = rx * z; glowInst[o + 3] = ry * z;
         glowInst[o + 4] = R / 255; glowInst[o + 5] = G / 255; glowInst[o + 6] = B / 255; glowInst[o + 7] = A;
         glowInstCount++;
     } else {
@@ -639,7 +647,6 @@ function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, count);
     return g.canvas;
 }
-function flushGlowGL(ox, oy, vw, vh) { return glDrawInstanced(glowInst, glowInstCount, ox, oy, vw, vh, true); }
 
 // ── GPU instanced trees (optional, guarded) ─────────────────────────────────
 // The cached canopy is blitted cheaply but must be REBUILT in bands for sway —
@@ -810,11 +817,15 @@ function renderTreesGPU(w, h, cell, vw, vh) {
             if (s === BURN_TREE) {
                 const age = burnMax[i] > 0 ? (1 - burnTimer[i] / burnMax[i]) : 0;
                 const burn = age < 0.35 ? 0 : (age - 0.35) / 0.65;
-                dw = sw0 * (1 - burn * 0.45); dh = sh0 * (1 - burn * 0.45); charAmt = burn;
+                dw = (sw0 * (1 - burn * 0.45)) | 0; dh = (sh0 * (1 - burn * 0.45)) | 0; charAmt = burn;
             }
             const baseX = x * cell + cell * 0.5 + jitterX[i] * 0.7 + swX;
             const baseY = y * cell + cell * 0.92 + jitterY[i] * 0.4;
-            const dx = baseX - dw * 0.5, dy = baseY - dh;
+            // Snap each sprite to whole world pixels exactly like the 2D path does —
+            // with the render camera also pixel-snapped, a full-health tree at 1× zoom
+            // then samples its atlas texels 1:1 (crisp pixel art), instead of being
+            // bilinearly smeared by a sub-pixel sway/jitter offset (~12% softer).
+            const dx = (baseX - dw * 0.5 + 0.5) | 0, dy = (baseY - dh + 0.5) | 0;
             emitTree((dx - camX) * z, (dy - camY) * z, dw * z, dh * z,
                      tv * treeScaledCellW, b * treeScaledCellH, sw0, sh0, charAmt);
             if (blossom > 0 && charAmt < 0.1 && (((i * 2246822519) >>> 0) & 7) < 3) {
@@ -939,6 +950,16 @@ function refreshDpiScale() {
 // FPS cap — 0 = unlimited, otherwise minimum ms between rendered frames
 let minFrameMs    = 0;
 let lastRenderMs  = 0;
+// Display refresh interval, learned from the rAF frame timestamps. Those are
+// vsync-aligned, so a heavy frame can only stretch the gap to a whole MULTIPLE of
+// the refresh — the shortest gap seen IS the refresh, even under load. The FPS cap
+// and the governor both work from what the screen (or Wallpaper Engine's own FPS
+// limiter) can actually deliver, not from the cap setting alone.
+let vsyncMs       = 1000;        // unknown until the first frames arrive
+let lastRafTs     = 0;
+let nextRenderMs  = 0;           // FPS-cap accumulator: keeps the AVERAGE rate = the cap
+let renderDtSec   = 1 / 60;      // wall time between rendered frames (clamped)
+let lastWorkMs    = 0;           // JS time the previous loop() spent (sim + render)
 
 // Quality multiplier for particle caps (Low/Medium/High/Ultra)
 let qMul = 1.0;
@@ -2666,9 +2687,11 @@ const BUTTERFLY_COLORS = [
 function spawnInsect() {
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const isDragon = Math.random() < 0.35;
-    let x = camX + Math.random() * canvas.width, y = camY + Math.random() * canvas.height;
+    // Spawn across the visible WORLD extent (larger than the screen when zoomed out).
+    const vwW = canvas.width / viewZoom, vwH = canvas.height / viewZoom;
+    let x = camX + Math.random() * vwW, y = camY + Math.random() * vwH;
     for (let t = 0; t < 8; t++) {                         // try to place over the right surface
-        const tx = camX + Math.random() * canvas.width, ty = camY + Math.random() * canvas.height;
+        const tx = camX + Math.random() * vwW, ty = camY + Math.random() * vwH;
         if (isDragon ? isWaterAt(tx, ty) : isLandAt(tx, ty)) { x = tx; y = ty; break; }
     }
     insects.push({
@@ -2686,8 +2709,8 @@ function updateInsects(dt) {
     if (insects.length < target && Math.random() < 0.08 * dt) spawnInsect();
     if (!props.showInsects && insects.length) { insects.length = 0; return; }
     if (!insects.length) return;
-    const wxF = Math.cos(windAngle), minX = camX - 30, maxX = camX + canvas.width + 30,
-          minY = camY - 30, maxY = camY + canvas.height + 30;
+    const wxF = Math.cos(windAngle), minX = camX - 30, maxX = camX + canvas.width / viewZoom + 30,
+          minY = camY - 30, maxY = camY + canvas.height / viewZoom + 30;
     let wI = 0;
     for (let i = 0; i < insects.length; i++) {
         const p = insects[i];
@@ -3659,6 +3682,7 @@ function spawnLeaf() {
         rotSpd: (Math.random() - 0.5) * 0.12,
         life: 1.0,
         color,
+        css: `rgb(${color[0]},${color[1]},${color[2]})`,   // built once, not per frame
     });
 }
 
@@ -4802,6 +4826,11 @@ function updateCamera() {
     }
     camX = Math.max(0, Math.min(maxX, camX));
     camY = Math.max(0, Math.min(maxY, camY));
+    // NaN never recovers on its own (every ease/clamp propagates it), so one bad
+    // frame — e.g. a 0×0 viewport while the wallpaper is hidden — would freeze the
+    // view for good. Snap back to the origin instead.
+    if (camX !== camX) camX = 0;
+    if (camY !== camY) camY = 0;
 }
 
 // Nearby-cell offsets (dx, dy) used to cast firelight onto water close to a flame.
@@ -4819,11 +4848,22 @@ function drawWorldLayer(src, cx, cy, vw, vh) {
 }
 
 function render() {
+    updateCamera();
+    // Draw from a camera snapped to whole DEVICE pixels. The eased camera comes to
+    // rest at fractional positions, and a sub-pixel offset bilinearly resamples every
+    // pixel-art layer (terrain, trees) — measured ~25–30% softer edges. Only the
+    // render sees the snapped value; the sim, the pan easing and input mapping keep
+    // the true one (restored even if a draw throws).
+    const tcx = camX, tcy = camY, z = viewZoom;
+    camX = Math.round(tcx * z) / z;
+    camY = Math.round(tcy * z) / z;
+    try { renderScene(); } finally { camX = tcx; camY = tcy; }
+}
+
+function renderScene() {
     const w = canvas.width;
     const h = canvas.height;
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
-
-    updateCamera();
 
     // Background: cached static layer (dirt + water + paths + grass + rocks + ash)
     // Rebuild on a scar change OR when the camera has panned far enough to reveal
@@ -4927,10 +4967,11 @@ function render() {
     // hue spread + a soft underglow so neighbours merge under `lighter`), rather
     // than a field of identical red dots. Visible cell window only.
     {
+    // vw/vh = the VISIBLE world extent (grows when zoomed out), not the screen size.
     const sx0 = Math.max(0, (camX / cell) | 0);
-    const sx1 = Math.min(cols - 1, Math.ceil((camX + w) / cell));
+    const sx1 = Math.min(cols - 1, Math.ceil((camX + vw) / cell));
     const sy0 = Math.max(0, (camY / cell) | 0);
-    const sy1 = Math.min(rows - 1, Math.ceil((camY + h) / cell));
+    const sy1 = Math.min(rows - 1, Math.ceil((camY + vh) / cell));
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     for (let y = sy0; y <= sy1; y++) {
@@ -4976,8 +5017,9 @@ function render() {
                 ctx.stroke();
             }
             // Coal pop — a coal occasionally flares (rare + soft so it reads as the
-            // odd ember catching, not a strobe)
-            if (Math.random() < 0.004 * heat) {
+            // odd ember catching, not a strobe). Chance scales with frame time so it's
+            // the same pops-per-second at 60 / 144 / 240 Hz (unchanged at 60).
+            if (Math.random() < 0.004 * heat * renderDtSec * 60) {
                 ctx.fillStyle = "rgb(255,224,160)";
                 ctx.globalAlpha = 0.32 * heat;
                 ctx.beginPath();
@@ -5031,9 +5073,9 @@ function render() {
         if (ip > 0.03) {
             // Frozen water — pale icy sheen on the visible water cells
             const ix0 = Math.max(0, (camX / cell) | 0);
-            const ix1 = Math.min(cols - 1, Math.ceil((camX + w) / cell));
+            const ix1 = Math.min(cols - 1, Math.ceil((camX + vw) / cell));
             const iy0 = Math.max(0, (camY / cell) | 0);
-            const iy1 = Math.min(rows - 1, Math.ceil((camY + h) / cell));
+            const iy1 = Math.min(rows - 1, Math.ceil((camY + vh) / cell));
             ctx.fillStyle = `rgba(206,228,242,${(ip * 0.55).toFixed(3)})`;
             for (let y = iy0; y <= iy1; y++) {
                 const rb = y * cols;
@@ -5045,13 +5087,15 @@ function render() {
         if (sp > 0.03) {
             // Snow blanket — bluish white over the whole visible world + speckle
             if (!snowPattern) buildSnowPattern();
+            // World-space fill → cover the visible WORLD extent (vw×vh), which is
+            // larger than the screen when zoomed out (w×h left the edges bare).
             ctx.fillStyle = `rgba(238,244,255,${(sp * 0.72).toFixed(3)})`;
-            ctx.fillRect(camX, camY, w, h);
+            ctx.fillRect(camX, camY, vw, vh);
             if (snowPattern) {
                 ctx.save();
                 ctx.globalAlpha = sp * 0.5;
                 ctx.fillStyle = snowPattern;
-                ctx.fillRect(camX, camY, w, h);
+                ctx.fillRect(camX, camY, vw, vh);
                 ctx.restore();
             }
         }
@@ -5275,17 +5319,18 @@ function render() {
     // --- Fire glow pass ---
     // Track the fire's pixel bounding box for the heat-shimmer pass.
     let fbX0 = 1e9, fbY0 = 1e9, fbX1 = -1e9, fbY1 = -1e9;
+    if (glowGPU) glowInstCount = 0;
+    if (burningCount === 0) glowVisBurning = 0;
     if (burningCount > 0) {
         // Only the visible region matters: off-screen glow is never composited,
         // so scan/draw/clear just the on-screen cell window (+ a glow margin).
         const gPad = 48;
         const vx0 = Math.max(0, ((camX - gPad) / cell) | 0);
-        const vx1 = Math.min(cols - 1, Math.ceil((camX + w + gPad) / cell));
+        const vx1 = Math.min(cols - 1, Math.ceil((camX + vw + gPad) / cell));
         const vy0 = Math.max(0, ((camY - gPad) / cell) | 0);
-        const vy1 = Math.min(rows - 1, Math.ceil((camY + h + gPad) / cell));
+        const vy1 = Math.min(rows - 1, Math.ceil((camY + vh + gPad) / cell));
         if (!glowGPU) glowCtx.clearRect(Math.max(0, camX - gPad), Math.max(0, camY - gPad),
-                          w + gPad * 2, h + gPad * 2);
-        glowInstCount = 0;   // reset the GPU instance queue for this frame
+                          vw + gPad * 2, vh + gPad * 2);
         // Glow level-of-detail. A screen-filling blaze is thousands of cells × 3
         // additive blobs. On the 2D path that's thousands of CPU draw calls — a
         // stutter wall on big fires — so the EXTRA layers (ember-bed, bright core,
@@ -5297,7 +5342,11 @@ function render() {
         // of large additive blobs — a fill-rate wall even on a good card — so it
         // limits the extra layers / coarsens cells too, just at much higher
         // thresholds the governor pulls in further when frames start to slip.
-        const glowQ = Math.round(burningCount / 128) * 128;
+        // The count is the burning cells actually ON SCREEN (last frame's scan) — the
+        // whole-world burningCount let a fire that was mostly off-screen (the map is
+        // 1.5× the view by default) coarsen the glow you can see.
+        const glowQ = Math.round(glowVisBurning / 128) * 128;
+        let visBurn = 0;
         let glowExtraFrac, glowCellFrac;
         if (glowGPU) {
             const head = 0.45 + 0.55 * perfQuality;     // 1.0 smooth → ~0.45 under load
@@ -5315,6 +5364,7 @@ function render() {
                 const i = rowBase + x;
                 const s = grid[i];
                 if (s !== BURN_GRASS && s !== BURN_TREE) continue;
+                visBurn++;
                 const isTree = s === BURN_TREE;
                 const ihash = ((i * 2246822519) >>> 0) / 4294967296;   // stable per-cell 0..1
                 const pxL = x * cell, pxT = y * cell;
@@ -5439,37 +5489,46 @@ function render() {
             }
         }
         glowCtx.globalAlpha = 1;   // reset for the next frame's clear/draws
+        glowVisBurning = visBurn;  // drives next frame's LOD (on-screen fire only)
 
-        // Composite only the fire's bounding region (with padding for the blur
-        // spread) so the glow blur cost stays proportional to the fire size, not
-        // the whole (large) world canvas.
-        const gpad = 36;
+        // Composite only the fire's bounding region so the cost stays proportional
+        // to the fire size, not the whole (large) world. The margin must cover the
+        // furthest glow from a burning cell: water firelight sits up to ~3.4 cells
+        // out, and a coarsened blaze's enlarged ember-bed ~2.8 — a fixed 36px clipped
+        // both at 4K (20px cells), so it scales with the cell size.
+        const gpad = Math.max(36, cell * 3.5);
         const gx0 = Math.max(0, (fbX0 - gpad) | 0);
         const gy0 = Math.max(0, (fbY0 - gpad) | 0);
         const gx1 = Math.min(worldPxW, (fbX1 + cell + gpad) | 0);
         const gy1 = Math.min(worldPxH, (fbY1 + cell + gpad) | 0);
         const gw = gx1 - gx0, gh = gy1 - gy0;
-        if (gw > 0 && gh > 0) {
+        if (glowGPU && gw > 0 && gh > 0 && glowInstCount > 0) {
+            // GPU: ONE instanced draw of every glow blob on the soft radial sprite
+            // (its wide falloff is the bloom — no CPU blur pass), composited
+            // additively over the fire's SCREEN-space box. Strength = the old
+            // Fire-glow-scaled bloom pass + a constant base pass, summed into a
+            // single composite (1.0 at default settings).
             const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
-            const glowAmt = props.fireGlow * audioBoost;
-            if (glowGPU) {
-                // GPU path: every queued blob was rendered in ONE instanced draw on
-                // the soft radial sprite (its wide falloff = the bloom, so no CPU blur
-                // pass). Composite the GL buffer additively over the scene — a stronger
-                // bloom pass scaled by the fireGlow knob, plus a constant base pass for
-                // the ember/core sharpness (mirrors the old 2D screen+lighter pair).
-                const glc = flushGlowGL(gx0, gy0, gw, gh);
+            const k = ((props.fireGlow > 0 && qGlowBlur) ? Math.min(1, 0.6 * props.fireGlow * audioBoost) : 0) + 0.4;
+            const glc = glDrawInstanced(glowInst, glowInstCount, 0, 0, w, h, true);
+            const sx0 = Math.max(0, ((gx0 - camX) * z) | 0), sy0 = Math.max(0, ((gy0 - camY) * z) | 0);
+            const sx1 = Math.min(w, Math.ceil((gx1 - camX) * z)), sy1 = Math.min(h, Math.ceil((gy1 - camY) * z));
+            const sw = sx1 - sx0, sh = sy1 - sy0;
+            if (sw > 0 && sh > 0) {
                 ctx.save();
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
                 ctx.imageSmoothingEnabled = true;
                 ctx.globalCompositeOperation = "lighter";
-                if (props.fireGlow > 0 && qGlowBlur) {
-                    ctx.globalAlpha = Math.min(1, 0.6 * glowAmt);
-                    ctx.drawImage(glc, 0, 0, gw, gh, gx0, gy0, gw, gh);
-                }
-                ctx.globalAlpha = 0.4;   // base ember glow, always a touch
-                ctx.drawImage(glc, 0, 0, gw, gh, gx0, gy0, gw, gh);
+                ctx.globalAlpha = Math.min(1, k);
+                ctx.drawImage(glc, sx0, sy0, sw, sh, sx0, sy0, sw, sh);
+                if (k > 1) { ctx.globalAlpha = k - 1; ctx.drawImage(glc, sx0, sy0, sw, sh, sx0, sy0, sw, sh); }
                 ctx.restore();
-            } else {
+            }
+        }
+        if (!glowGPU && gw > 0 && gh > 0) {
+            const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
+            const glowAmt = props.fireGlow * audioBoost;
+            {
                 if (props.fireGlow > 0 && qGlowBlur) {
                     // Half-resolution blur: downscale the glow region 2×, blur at
                     // half the radius, and let the upscale smooth it back out —
@@ -5510,7 +5569,8 @@ function render() {
     // sideways with wind, so the fire looks alive and varied. Colour ramps deep
     // red base → orange → yellow → white-hot tip (blue-white at the hottest cores).
     // GPU: plumes+sparks+embers share one screen-space additive list (reset here,
-    // composited once after embers).
+    // unconditionally — they outlive the last burning cell), composited once after
+    // the embers.
     if (glowGPU) fxInstCount = 0;
     if (flamePlumes.length) {
         // GPU: emit screen-space additive instances (composited in one pass after
@@ -5616,13 +5676,14 @@ function render() {
         if (!glowGPU) ctx.restore();
     }
 
-    // GPU: one additive instanced draw composites glow's siblings — plume tongues,
-    // sparks and embers (all queued in screen-space fxInst above) — over the scene.
+    // GPU: one additive instanced draw composites the flames — plume tongues, sparks
+    // and embers (all queued in screen-space fxInst above) — over the scene.
     if (glowGPU && fxInstCount > 0) {
         const fxc = glDrawInstanced(fxInst, fxInstCount, 0, 0, w, h, true);
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = 1;
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(fxc, 0, 0, w, h, 0, 0, w, h);
         ctx.restore();   // back to the world transform
@@ -5631,18 +5692,21 @@ function render() {
     // Heat-shimmer distortion — over (and rising above) a sizable fire, snapshot
     // the region and redraw it in thin horizontal slices nudged sideways by an
     // animated sine, so the air above the flames ripples like real heat haze.
-    if (props.heatShimmer && burningCount > 14 && fbX1 >= fbX0
-        && qMul > 0.5 && worldPxW <= canvas.width + 2 && worldPxH <= canvas.height + 2) {
-        // (skipped on Low quality and when the world is larger than the screen,
-        //  i.e. while panning, since it snapshots the screen canvas)
+    if (props.heatShimmer && glowVisBurning > 14 && fbX1 >= fbX0 && qMul > 0.5) {
+        // (skipped on Low quality.) The fire box is in WORLD px but the snapshot and
+        // slices work on the SCREEN canvas, so map the box through the camera + zoom.
+        // This used to treat world px as screen px, so it had to be disabled whenever
+        // the map was larger than the screen — at the default map size the toggle
+        // silently did nothing.
         const pad = cell * 1.5;
-        let x0 = Math.max(0, (fbX0 - pad) | 0);
-        let x1 = Math.min(w, (fbX1 + cell + pad) | 0);
-        let top = Math.max(0, (fbY0 - cell * 3.5) | 0);          // extend up (heat rises)
-        let bot = Math.min(h, (fbY1 + cell) | 0);
+        let x0 = Math.max(0, ((fbX0 - pad - camX) * z) | 0);
+        let x1 = Math.min(w, ((fbX1 + cell + pad - camX) * z) | 0);
+        let top = Math.max(0, ((fbY0 - cell * 3.5 - camY) * z) | 0);   // extend up (heat rises)
+        let bot = Math.min(h, ((fbY1 + cell - camY) * z) | 0);
         // Clamp the shimmer region around the fire centre so a sprawling blaze
-        // doesn't make the snapshot + slice work explode.
-        const MAXW = 420, MAXH = 320;
+        // doesn't make the snapshot + slice work explode (scaled with resolution so
+        // it covers the same share of the view at 4K as at 1080p).
+        const MAXW = (420 * dpiScale) | 0, MAXH = (320 * dpiScale) | 0;
         if (x1 - x0 > MAXW) { const cx = (x0 + x1) >> 1; x0 = Math.max(0, cx - MAXW / 2 | 0); x1 = Math.min(w, x0 + MAXW); }
         if (bot - top > MAXH) { const cy = (top + bot) >> 1; top = Math.max(0, cy - MAXH / 2 | 0); bot = Math.min(h, top + MAXH); }
         const rw = x1 - x0, rh = bot - top;
@@ -5654,9 +5718,11 @@ function render() {
             }
             hazeCtx.clearRect(0, 0, rw, rh);
             hazeCtx.drawImage(ctx.canvas, x0, top, rw, rh, 0, 0, rw, rh);
-            const amp = Math.min(1.6, cell * 0.12) * Math.min(1, burningCount / 80);
+            const amp = Math.min(1.6 * dpiScale, cell * 0.12) * z * Math.min(1, glowVisBurning / 80);
             // taller bands when the region is large, so the slice count stays bounded
             const bandH = rh > 220 ? 4 : 3;
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);   // slices are screen px
             for (let yy = 0; yy < rh; yy += bandH) {
                 const ny = top + yy;
                 const rise = 0.35 + 0.65 * (1 - yy / rh);
@@ -5664,6 +5730,7 @@ function render() {
                          + Math.sin(ny * 0.5 - renderTimeSec * 7.8) * amp * 0.4 * rise;
                 ctx.drawImage(hazeCanvas, 0, yy, rw, bandH, x0 + dx, ny, rw, bandH);
             }
+            ctx.restore();
         }
     }
 
@@ -5695,9 +5762,7 @@ function render() {
             ctx.save();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.imageSmoothingEnabled = true;
-            // Soft sprite spreads the puff vs a hard 2D disc; boost composite alpha
-            // to keep the same smoke density.
-            ctx.globalAlpha = 1;
+            ctx.globalAlpha = 1;      // per-puff opacity is already baked into each instance
             ctx.drawImage(smc, 0, 0, w, h, 0, 0, w, h);
             ctx.restore();
         }
@@ -5746,13 +5811,16 @@ function render() {
             const fx = drawX(f), fy = drawY(f);
             const pulse = 0.45 + Math.sin(f.phase) * 0.45;
             const a = pulse * f.life;
-            // Halo (smaller, fainter — keeps the spotlight on the fire)
-            ctx.fillStyle = `rgba(220,255,140,${(a * 0.10).toFixed(3)})`;
+            // Halo (smaller, fainter — keeps the spotlight on the fire). Constant
+            // colours + globalAlpha: no per-frame rgba() string garbage.
+            ctx.globalAlpha = a * 0.10;
+            ctx.fillStyle = "rgb(220,255,140)";
             ctx.beginPath();
             ctx.arc(fx, fy, f.size * 2.4, 0, Math.PI * 2);
             ctx.fill();
             // Core
-            ctx.fillStyle = `rgba(240,255,170,${(a * 0.7).toFixed(3)})`;
+            ctx.globalAlpha = a * 0.7;
+            ctx.fillStyle = "rgb(240,255,170)";
             ctx.beginPath();
             ctx.arc(fx, fy, f.size, 0, Math.PI * 2);
             ctx.fill();
@@ -5764,13 +5832,13 @@ function render() {
     if (leaves.length) {
         for (const p of leaves) {
             const px = drawX(p), py = drawY(p);
-            const a = (p.life * 0.7).toFixed(2);
-            const [r, g, b] = p.color;
-            ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+            ctx.globalAlpha = p.life * 0.7;          // exact opacity, no per-frame string
+            ctx.fillStyle = p.css;
             ctx.beginPath();
             ctx.ellipse(px, py, p.size * 1.5, p.size * 0.55, p.rot, 0, Math.PI * 2);
             ctx.fill();
         }
+        ctx.globalAlpha = 1;
     }
 
     // Bird flocks — gull-wing silhouettes that actually beat their wings: a short
@@ -5960,7 +6028,8 @@ function render() {
         debugEl.style.display = "block";
         const wMode = WEATHER_NAMES[weatherCurrent] || "?";
         debugEl.textContent =
-            `fps=${avgFps.toFixed(0)}  sim=${SIM_HZ}Hz  frame=${frame}  static=${staticDirty?"dirty":"clean"}\n` +
+            `fps=${avgFps.toFixed(0)}  display=${(1000 / vsyncMs).toFixed(0)}Hz  quality=${(perfQuality * 100).toFixed(0)}%  ` +
+            `gpu=${glowGPU ? "on" : "off"}${treeGPU ? "+trees" : ""}  sim=${SIM_HZ}Hz  frame=${frame}  static=${staticDirty?"dirty":"clean"}\n` +
             `burn=${burningCount}  smoke=${smokeParticles.length}  embers=${embers.length}  ` +
             `plumes=${flamePlumes.length}  rain=${rainDrops.length}\n` +
             `leaves=${leaves.length}  fireflies=${fireflies.length}  birds=${birds.length}  ` +
@@ -5976,17 +6045,39 @@ function render() {
 // ============================================================
 // Loop (idles cheaply when nothing's happening)
 // ============================================================
-function loop() {
+function loop(ts) {
     requestAnimationFrame(loop);
 
     const now = performance.now();
 
-    // FPS cap — skip render if we haven't waited long enough.
-    // Sim still runs on its own time accumulator, so simulation is unaffected.
-    if (minFrameMs > 0 && (now - lastRenderMs) < (minFrameMs - 0.5)) {
-        // Allow sim to catch up so timing stays correct
-        if (lastSimMs === 0) lastSimMs = now;
-        return;
+    // Learn the display refresh from the rAF timestamps (see vsyncMs). Snap down to
+    // any clearly-faster gap; refine within the jitter band; ignore multiples (a
+    // dropped frame) and long gaps (tab hidden / resumed). A gap only counts if our
+    // own work left the frame mostly idle — otherwise it was set by OUR load, not the
+    // display, and a slow-from-the-start scene would teach a falsely slow refresh.
+    const ft = (typeof ts === "number") ? ts : now;
+    if (lastRafTs > 0) {
+        const d = ft - lastRafTs;
+        if (d > 3 && d < 250 && lastWorkMs < d * 0.6) {
+            if (d < vsyncMs * 0.8) vsyncMs = d;
+            else if (d < vsyncMs * 1.25) vsyncMs += (d - vsyncMs) * 0.05;
+        }
+    }
+    lastRafTs = ft;
+
+    // FPS cap. Only meaningful when the cap is BELOW the refresh rate (otherwise vsync
+    // already limits us). An accumulator keeps the average rate at the cap — the old
+    // "skip until a full interval has passed" rule could only land on whole refresh
+    // multiples, so 120 fps on a 144 Hz screen came out as 72. Sim time is decoupled,
+    // so skipped frames don't change gameplay pacing.
+    if (minFrameMs > 0 && minFrameMs > vsyncMs * 1.05) {
+        if (ft < nextRenderMs - vsyncMs * 0.5) {
+            if (lastSimMs === 0) lastSimMs = now;
+            lastWorkMs = 0;                       // an idle frame — a clean refresh sample
+            return;
+        }
+        nextRenderMs += minFrameMs;
+        if (ft - nextRenderMs > minFrameMs) nextRenderMs = ft + minFrameMs;   // resync after a stall
     }
     lastRenderMs = now;
     renderTimeSec = now * 0.001;
@@ -5996,15 +6087,22 @@ function loop() {
     if (lastFrameMs > 0) {
         const dt = now - lastFrameMs;
         if (dt > 0) avgFps = avgFps * 0.92 + (1000 / dt) * 0.08;
+        renderDtSec = Math.min(0.1, Math.max(0.001, dt * 0.001));
     }
     lastFrameMs = now;
 
-    // Governor: compare the smoothed frame time against the target (the FPS-cap
-    // interval, or 16.7ms for 60fps). ratio ≤ 1.08 → full quality; ≥ 1.5 → fully
-    // shed. Eased so detail changes are gradual and never oscillate. Only active
-    // after warm-up so a cold first second doesn't trigger a needless dip.
+    // Governor: compare the smoothed frame time against the frame time we can
+    // actually achieve — the slowest of the display refresh, the FPS cap, and 120 fps
+    // (never trade quality just to chase 144/240 Hz on a wallpaper). Measuring
+    // against the cap alone meant a 60 Hz screen with the default 120 cap looked
+    // permanently "2× too slow" and ran fully shed. ratio ≤ 1.08 → full quality;
+    // ≥ 1.5 → fully shed. Eased so detail changes are gradual and never oscillate.
+    // Only active after warm-up so a cold first second doesn't trigger a needless dip.
     if (frame > 90) {
-        const targetMs = minFrameMs > 0 ? minFrameMs : 16.7;
+        // If no idle frame has ever revealed the refresh (heavy from the very first
+        // frame), assume a 60 Hz display rather than "unknown = never shed".
+        const refreshMs = vsyncMs < 500 ? vsyncMs : 1000 / 60;
+        const targetMs = Math.max(refreshMs, minFrameMs, 1000 / 120);
         const ratio = (1000 / Math.max(1, avgFps)) / targetMs;
         let q = (1.5 - ratio) / 0.42;
         q = q < 0 ? 0 : (q > 1 ? 1 : q);
@@ -6058,6 +6156,7 @@ function loop() {
     }
 
     render();
+    lastWorkMs = performance.now() - now;
 }
 
 // ============================================================
