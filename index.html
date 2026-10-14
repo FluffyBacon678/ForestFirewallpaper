@@ -2967,12 +2967,32 @@ function scheduleStarterFire() {
     }, 300);
 }
 
+// Render at DEVICE pixels. innerWidth/innerHeight are CSS pixels, so on a scaled
+// display (e.g. a 4K panel at 150–200% Windows scaling, devicePixelRatio 1.5–2)
+// sizing the canvas to them rendered at a fraction of native resolution and the
+// browser stretched it — blurring all the pixel art. The bitmap is now
+// innerWidth × devicePixelRatio (capped at 8K) with its CSS size pinned to the
+// viewport, and pointer input is scaled by the same factor (inputScale).
+let inputScale = 1;
+function viewportPx() {
+    const cw = window.innerWidth, ch = window.innerHeight;
+    let dpr = window.devicePixelRatio || 1;
+    if (!(dpr > 0)) dpr = 1;
+    dpr = Math.min(dpr, 7680 / Math.max(1, cw), 4320 / Math.max(1, ch));   // never above 8K
+    dpr = Math.max(dpr, 1 / 1024);
+    return { cw, ch, dpr, w: Math.max(1, Math.round(cw * dpr)), h: Math.max(1, Math.round(ch * dpr)) };
+}
+
 function resize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    // The visible canvas is the viewport...
+    const vp = viewportPx();
+    const w = vp.w;
+    const h = vp.h;
+    // The visible canvas is the viewport (in device pixels)...
     canvas.width  = w;
     canvas.height = h;
+    canvas.style.width  = vp.cw + "px";
+    canvas.style.height = vp.ch + "px";
+    inputScale = w / Math.max(1, vp.cw);
     if (!glowCanvas) {
         glowCanvas = document.createElement("canvas");
         glowCtx    = glowCanvas.getContext("2d");
@@ -6352,12 +6372,12 @@ function loop(ts) {
 let mouseDown = false, rightDown = false, zoomPending = 0;
 function onIgniteInput(clientX, clientY) {
     if (!props.mouseInteraction) return;
-    // map the screen cursor into world coordinates (account for camera + zoom)
-    igniteAt(camX + clientX / viewZoom, camY + clientY / viewZoom, props.igniteRadius);
+    // map the screen cursor into world coordinates (CSS px → canvas px, then camera + zoom)
+    igniteAt(camX + clientX * inputScale / viewZoom, camY + clientY * inputScale / viewZoom, props.igniteRadius);
 }
 function onDouseInput(clientX, clientY) {
     if (!props.mouseInteraction || !props.rightClickDouse) return;
-    douseAt(camX + clientX / viewZoom, camY + clientY / viewZoom, Math.max(3, props.igniteRadius + 2));
+    douseAt(camX + clientX * inputScale / viewZoom, camY + clientY * inputScale / viewZoom, Math.max(3, props.igniteRadius + 2));
 }
 canvas.addEventListener("mousedown",  e => {
     if (e.button === 2) { rightDown = true; onDouseInput(e.clientX, e.clientY); }
@@ -6366,7 +6386,7 @@ canvas.addEventListener("mousedown",  e => {
 canvas.addEventListener("mouseup",    () => { mouseDown = false; rightDown = false; });
 canvas.addEventListener("contextmenu", e => { if (props.rightClickDouse) e.preventDefault(); });
 canvas.addEventListener("mousemove",  e => {
-    mouseX = e.clientX; mouseY = e.clientY; mouseInside = true;
+    mouseX = e.clientX * inputScale; mouseY = e.clientY * inputScale; mouseInside = true;   // canvas px
     if (mouseDown) onIgniteInput(e.clientX, e.clientY);
     // right-hold rain is driven per sim-tick in update() (uses mouseX/Y), so the
     // shower follows the cursor whether it's moving or held still
@@ -6386,10 +6406,11 @@ canvas.addEventListener("wheel", e => {
 
     if (z1 <= Z_MAX && z1 >= coverFloor) {
         // ── Smooth VIEW zoom toward the cursor — world preserved, no regen ──
-        const fx = camX + e.clientX / z0, fy = camY + e.clientY / z0;  // world point under cursor
+        const ex = e.clientX * inputScale, ey = e.clientY * inputScale;   // canvas px
+        const fx = camX + ex / z0, fy = camY + ey / z0;              // world point under cursor
         viewZoom = z1;
-        camX = fx - e.clientX / z1;                                    // keep that point fixed
-        camY = fy - e.clientY / z1;
+        camX = fx - ex / z1;                                          // keep that point fixed
+        camY = fy - ey / z1;
     } else {
         // ── Past the smooth buffer → regenerate one detail step (the old zoom
         //    behaviour: bigger cells in, smaller/lusher out). Apparent scale is
@@ -6417,7 +6438,7 @@ canvas.addEventListener("wheel", e => {
     props.panY = maxY > 0 ? camY / maxY : 0.5;
 }, { passive: false });
 canvas.addEventListener("mouseleave", () => { mouseInside = false; mouseDown = false; rightDown = false; });
-canvas.addEventListener("mouseenter", e => { mouseInside = true; mouseX = e.clientX; mouseY = e.clientY; });
+canvas.addEventListener("mouseenter", e => { mouseInside = true; mouseX = e.clientX * inputScale; mouseY = e.clientY * inputScale; });
 canvas.addEventListener("touchstart", e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
 canvas.addEventListener("touchmove",  e => { for (const t of e.touches) onIgniteInput(t.clientX, t.clientY); }, { passive: true });
 // Every resize regenerates the world (~1 s at 4K), and browsers fire resize events
@@ -6428,9 +6449,9 @@ let resizeTimer = 0;
 window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-        const nw = window.innerWidth, nh = window.innerHeight;
-        if (nw < 2 || nh < 2) return;
-        if (nw === canvas.width && nh === canvas.height) return;
+        const vp = viewportPx();
+        if (vp.cw < 2 || vp.ch < 2) return;
+        if (vp.w === canvas.width && vp.h === canvas.height) return;   // also catches DPI-only changes
         resize();
     }, 150);
 });
