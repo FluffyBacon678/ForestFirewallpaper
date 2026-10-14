@@ -158,7 +158,6 @@ function burnIntensity(age) {
         return 1.0 - 0.85 * (t * t);         // 1.0 → 0.15
     }
 }
-const UPDATE_EVERY      = 2;
 const MAX_SMOKE         = 1500;
 const MAX_EMBERS        = 700;
 const MAX_WIND_PARTS    = 90;
@@ -176,7 +175,6 @@ const MAGIC_FIRE = [
 ];
 const MAX_RAIN          = 1200;
 const MAX_CLOUDS        = 8;
-const MAX_HEAT_DRAFTS   = 200;
 const ROCK_NUM_VARIANTS = 4;
 
 // Tree species (encoded in variant: variant = (species << 1) | sizeBit)
@@ -910,10 +908,6 @@ function buildTreeSwayTables() {
     }
     treeSwayBuilt = true;
 }
-// Sway is a ~1px, ~2s oscillation drawn at integer positions — sampling it every
-// 2nd frame (30Hz at 60fps, 60Hz at 120fps) is visually identical to every frame
-// and halves the biggest recurring render cost.
-const TREE_LAYER_GAP = 2;
 let treeSpW = 0, treeSpH = 0;
 let grassSpW = 0, grassSpH = 0;
 // Per-cell positional jitter (broken-grid look)
@@ -980,7 +974,6 @@ function refreshDpiScale() {
 
 // FPS cap — 0 = unlimited, otherwise minimum ms between rendered frames
 let minFrameMs    = 0;
-let lastRenderMs  = 0;
 // Display refresh interval, learned from the rAF frame timestamps. Those are
 // vsync-aligned, so a heavy frame can only stretch the gap to a whole MULTIPLE of
 // the refresh — the shortest gap seen IS the refresh, even under load. The FPS cap
@@ -3282,9 +3275,6 @@ const LEAF_COLORS = [
 // ============================================================
 // Weather — auto-cycles modes or honors the user's choice
 // ============================================================
-function weatherIntensityForMode(mode) {
-    return WEATHER_MOISTURE[mode] || 0;
-}
 // Convenience — returns the current *smoothed* moisture; what to actually use for spawning.
 function weatherIntensity() {
     return weatherIntensitySmooth;
@@ -3457,11 +3447,6 @@ function updateWeather(dt) {
     } else if (weatherFrontProgress > targetFront) {
         weatherFrontProgress = Math.max(0.0, weatherFrontProgress - frontStep);
     }
-}
-
-// Map weatherDirection property to a vector (vx, vy) and an inFront(x, y) test
-function weatherFrontCovers(px, py) {
-    return weatherFrontAmount(px, py) > 0.12;
 }
 
 function smooth01(t) {
@@ -4088,7 +4073,7 @@ function update(dt = SIM_DT) {
             }
             // Smoulder: fresh ash occasionally pops a tiny ember
             if (props.showEmbers && burnTimer[i] > 120
-                && embers.length < (MAX_EMBERS * qMul) | 0 && Math.random() < 0.02 * sdt) {
+                && embers.length < MAX_EMBERS * qMul && Math.random() < 0.02 * sdt) {
                 const y = (i / cols) | 0;
                 const x = i - y * cols;
                 spawnEmber(
@@ -4101,7 +4086,7 @@ function update(dt = SIM_DT) {
                     Math.random() * 6.28);
             }
             // Crackle — a hot coal occasionally snaps off a couple of bright sparks
-            if (props.showEmbers && burnTimer[i] > 200 && sparks.length < (MAX_SPARKS * qMul) | 0
+            if (props.showEmbers && burnTimer[i] > 200 && sparks.length < MAX_SPARKS * qMul
                 && Math.random() < 0.012 * sdt) {
                 const cy2 = (i / cols) | 0, cx2 = i - cy2 * cols;
                 const n = 1 + (Math.random() * 2 | 0);
@@ -4324,7 +4309,7 @@ function update(dt = SIM_DT) {
     const leafActive = (seasonParam ? seasonParam.snow : 0) < 0.5;
     if (props.showLeaves && leafActive && props.showWindParticles && props.windStrength > 0.05) {
         const spawnRate = 0.25 * Math.min(1, props.windStrength) * (0.2 + seasonLeaf * 2.6);
-        if (leaves.length < (MAX_LEAVES * qMul) | 0 && Math.random() < spawnRate * dt) spawnLeaf();
+        if (leaves.length < MAX_LEAVES * qMul && Math.random() < spawnRate * dt) spawnLeaf();
         const wxL = wxF * 0.05 * props.windStrength;
         const wyL = wyF * 0.05 * props.windStrength;
         const minX = -25, maxX = worldPxW + 25;
@@ -4447,7 +4432,7 @@ function update(dt = SIM_DT) {
 
     // Wind streaks (subtle ground-level dust trails in wind direction)
     if (props.showWindParticles && props.windStrength > 0.05) {
-        if (windStreaks.length < (MAX_WIND_PARTS * qMul) | 0 && Math.random() < 0.5 * dt) {
+        if (windStreaks.length < MAX_WIND_PARTS * qMul && Math.random() < 0.5 * dt) {
             const w = worldPxW, h = worldPxH;
             let x, y;
             if (Math.abs(wxF) > Math.abs(wyF)) {
@@ -6238,7 +6223,8 @@ function renderScene() {
         const wMode = WEATHER_NAMES[weatherCurrent] || "?";
         debugEl.textContent =
             `fps=${avgFps.toFixed(0)}  display=${(1000 / vsyncMs).toFixed(0)}Hz  quality=${(perfQuality * 100).toFixed(0)}%  ` +
-            `gpu=${glowGPU ? "on" : "off"}${treeGPU ? "+trees" : ""}  sim=${SIM_HZ}Hz  frame=${frame}  static=${staticDirty?"dirty":"clean"}\n` +
+            `gpu=${glowGPU ? "on" : "off"}${treeGPU ? "+trees" : ""}  sim=${SIM_HZ}Hz  frame=${frame}  static=${staticDirty?"dirty":"clean"}` +
+            `${frameErrors ? `  ERRORS=${frameErrors}` : ""}\n` +
             `burn=${burningCount}  smoke=${smokeParticles.length}  embers=${embers.length}  ` +
             `plumes=${flamePlumes.length}  rain=${rainDrops.length}\n` +
             `leaves=${leaves.length}  fireflies=${fireflies.length}  birds=${birds.length}  ` +
@@ -6288,7 +6274,6 @@ function loop(ts) {
         nextRenderMs += minFrameMs;
         if (ft - nextRenderMs > minFrameMs) nextRenderMs = ft + minFrameMs;   // resync after a stall
     }
-    lastRenderMs = now;
     renderTimeSec = now * 0.001;
     frame++;
 
@@ -6350,7 +6335,7 @@ function loop(ts) {
     if (isActive) {
         let iters = 0;
         while (now - lastSimMs >= SIM_TICK_MS && iters < MAX_SIM_PER_FRAME) {
-            update();
+            try { update(); } catch (e) { reportFrameError("update", e); }
             lastSimMs += SIM_TICK_MS;
             iters++;
         }
@@ -6364,14 +6349,29 @@ function loop(ts) {
         simAlpha = 1;
     }
 
-    render();
+    try { render(); }
+    catch (e) {
+        reportFrameError("render", e);
+        // A throw after a ctx.save() leaves the state stack unbalanced — it would
+        // grow every frame, with the transform/alpha/composite mode corrupted.
+        // Re-assigning the size resets the context state (and the stack) completely.
+        canvas.width = canvas.width;
+    }
     lastWorkMs = performance.now() - now;
+}
+
+// Contain a per-frame exception instead of letting it break every frame after it:
+// log the first few with their stack, then just count (the debug overlay shows it).
+let frameErrors = 0;
+function reportFrameError(where, e) {
+    frameErrors++;
+    if (frameErrors <= 3) console.error(`[forest-fire] ${where} threw (#${frameErrors}):`, e);
 }
 
 // ============================================================
 // Input
 // ============================================================
-let mouseDown = false, rightDown = false, zoomPending = 0;
+let mouseDown = false, rightDown = false;
 function onIgniteInput(clientX, clientY) {
     if (!props.mouseInteraction) return;
     // map the screen cursor into world coordinates (CSS px → canvas px, then camera + zoom)
@@ -6461,6 +6461,14 @@ window.addEventListener("resize", () => {
 // ============================================================
 // Wallpaper Engine property listener
 // ============================================================
+// A malformed numeric value must not become NaN: it spreads silently through the sim
+// (a NaN spread rate never ignites; NaN wind sends every particle to NaN coordinates
+// for good). Keep the previous value instead.
+function finiteOr(v, prev) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : prev;
+}
+
 function applyProperty(key, raw) {
     if (raw == null) return;
     const v = raw.value;
@@ -6473,7 +6481,7 @@ function applyProperty(key, raw) {
         case "treeDensity":
         case "grassDensity":
         case "rockDensity":
-            props[key] = Number(v);
+            props[key] = finiteOr(v, props[key]);
             needRebuild = true;
             needBg = true;
             break;
@@ -6507,10 +6515,10 @@ function applyProperty(key, raw) {
         case "panX":
         case "panY":
         case "panSpeed":
-            props[key] = Number(v);
+            props[key] = finiteOr(v, props[key]);
             break;
         case "treeScale":
-            props.treeScale = Number(v);
+            props.treeScale = finiteOr(v, props.treeScale);
             if (propBatch) propBatch.atlas = true;
             else { buildScaledTreeAtlas(); treeLayerCountdown = 0; }   // rebake the pre-scaled tree sizes
             break;
@@ -6571,7 +6579,7 @@ function applyProperty(key, raw) {
             break;
         case "seasonLength":
         case "snowAmount":
-            props[key] = Number(v);
+            props[key] = finiteOr(v, props[key]);
             break;
         case "weatherMode":
             props.weatherMode = String(v);
