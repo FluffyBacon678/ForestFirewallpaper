@@ -1143,28 +1143,46 @@ function drawDirtBackground() {
     c.imageSmoothingEnabled = true;
     c.drawImage(noiseCanvas, 0, 0, nw, nh, 0, 0, w, h);
 
-    // Mossy green flecks (pixel-level grain — gives the lush jungle-floor texture)
-    const lightSpecks = (w * h) / 45;
-    for (let i = 0; i < lightSpecks; i++) {
-        const x = (Math.random() * w) | 0;
-        const y = (Math.random() * h) | 0;
-        const a = (0.10 + Math.random() * 0.20).toFixed(2);
-        const moss = Math.random() < 0.7;
-        const r = moss ? (55 + Math.random() * 30 | 0) : (95 + Math.random() * 30 | 0);
-        const g = moss ? (85 + Math.random() * 40 | 0) : (75 + Math.random() * 25 | 0);
-        const b = moss ? (40 + Math.random() * 22 | 0) : (45 + Math.random() * 20 | 0);
-        c.fillStyle = `rgba(${r},${g},${b},${a})`;
-        c.fillRect(x, y, 1, 1);
-    }
-
-    // Darker specks
-    const darkSpecks = (w * h) / 140;
-    for (let i = 0; i < darkSpecks; i++) {
-        const x = (Math.random() * w) | 0;
-        const y = (Math.random() * h) | 0;
-        const a = (0.18 + Math.random() * 0.28).toFixed(2);
-        c.fillStyle = `rgba(14,8,4,${a})`;
-        c.fillRect(x, y, 1 + (Math.random() < 0.3 ? 1 : 0), 1);
+    // Pixel grain: mossy green flecks (~1 per 45 px — the lush jungle-floor texture)
+    // then darker specks (~1 per 140 px). Each used to be its own 1×1 fillRect with a
+    // fresh rgba() string — ~550k canvas calls, ~0.85 s of every world build at 4K
+    // (load, zoom steps, density sliders). Now they're rasterised straight into pixel
+    // strips and each strip is composited once. Source-over is associative, so it's
+    // the same image (same densities, colours and light-then-dark order).
+    const STRIP = 256;
+    const grain = document.createElement("canvas");
+    grain.width = w; grain.height = Math.min(STRIP, h);
+    const gctx = grain.getContext("2d");
+    const over = (d, o, r, g, b, a) => {              // non-premultiplied source-over
+        const da = d[o + 3] / 255;
+        if (da === 0) { d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a * 255; return; }
+        const k = da * (1 - a), oa = a + k;
+        d[o] = (r * a + d[o] * k) / oa; d[o + 1] = (g * a + d[o + 1] * k) / oa;
+        d[o + 2] = (b * a + d[o + 2] * k) / oa; d[o + 3] = oa * 255;
+    };
+    for (let y0 = 0; y0 < h; y0 += STRIP) {
+        const sh = Math.min(STRIP, h - y0);
+        const id = gctx.createImageData(w, sh), d = id.data;
+        const lightSpecks = (w * sh) / 45;
+        for (let i = 0; i < lightSpecks; i++) {
+            const x = (Math.random() * w) | 0, y = (Math.random() * sh) | 0;
+            const a = 0.10 + Math.random() * 0.20;
+            const moss = Math.random() < 0.7;
+            const r = moss ? (55 + Math.random() * 30 | 0) : (95 + Math.random() * 30 | 0);
+            const g = moss ? (85 + Math.random() * 40 | 0) : (75 + Math.random() * 25 | 0);
+            const b = moss ? (40 + Math.random() * 22 | 0) : (45 + Math.random() * 20 | 0);
+            over(d, (y * w + x) * 4, r, g, b, a);
+        }
+        const darkSpecks = (w * sh) / 140;
+        for (let i = 0; i < darkSpecks; i++) {
+            const x = (Math.random() * w) | 0, y = (Math.random() * sh) | 0;
+            const a = 0.18 + Math.random() * 0.28;
+            const o = (y * w + x) * 4;
+            over(d, o, 14, 8, 4, a);
+            if (Math.random() < 0.3 && x + 1 < w) over(d, o + 4, 14, 8, 4, a);   // some are 2px wide
+        }
+        gctx.putImageData(id, 0, 0);
+        c.drawImage(grain, 0, 0, w, sh, 0, y0, w, sh);
     }
 
     // Sparse pebbles (small, intentional — not the big circular blobs)
