@@ -249,19 +249,24 @@ handful of GPU draws, composited over the 2D terrain.
 
 ### Measured frame times
 
-Real hardware (GTX 1050 Ti, the weakest target; render time, sim is separate):
+Real hardware (GTX 1050 Ti, the weakest target), whole frame = sim + render:
 
-| Scene | Render |
+| Scene | Frame time |
 |---|---|
-| Normal wildfire, 1080p–1440p | ~1–4 ms |
-| Big fire, 4K | ~5–8 ms |
-| **Screen-filling inferno, 4K** (~17k burning cells) | **~4.6 ms median, flat** (no spikes) |
-| 5K, active fire | ~6.5 ms |
+| Idle forest, 4K | ~2 ms (sim 0.3 ms) |
+| Normal wildfire, 1080p–1440p | ~2–5 ms |
+| **Screen-filling inferno, 4K** (~17k burning cells) | **~9 ms median** (sim 3 + render 6) |
+| **Its burn-down** (whole screen a glowing coal bed + ageing scars) | **~9 ms median, 12.6 ms p90** |
+| 5K, active fire | ~7–10 ms |
 
-The fixed-timestep sim adds a few ms that scales with *total* live fire (≈8 ms at
-an absolute screen-filling max); normal fires are a fraction of that. Net: 120 fps
-on normal/large fires across resolutions, comfortably 60 fps+ even at a 4K/5K
-screen-filling extreme. Validated by a pre-upload smoke test: no errors across
+The worst case used to be the *aftermath*: once a huge fire burned down, every
+cell was a hot coal drawn with CPU canvas calls and the scar layer re-baked the
+whole view every few frames — 30–600 ms frames. The coal bed is now one instanced
+GPU draw and the scar layer re-bakes only the 16×16-cell tiles that changed,
+under a per-frame time budget. The fire simulation itself was made ~4× faster
+(proven bit-identical to the old code with a seeded RNG). Net: 100+ fps through a
+screen-filling 4K fire and its burn-down on the weakest target GPU. Validated by a
+pre-upload smoke test: no errors across
 1080p→5K / ultrawide / portrait, both render paths, all presets, all
 seasons/weather, no flicker, stable memory (instance buffers and particle pools
 plateau — no leak), and clean recovery from a forced WebGL context loss.
@@ -282,8 +287,9 @@ same physical density as 1080p instead of 4× the work.
 
 - **Two-tier baked terrain** — the worldgen-static ground (dirt, smooth water,
   paths, lily pads, rocks, grass) is baked once per world; the per-fire ash/scar
-  layer only refreshes its **visible window** (+ a pan margin), so scar updates
-  cost the same at 1080p or 4K. Half-resolution shoreline blur cuts the bake hitch.
+  layer re-bakes only the **tiles a change touched** (in view, time-budgeted), so
+  its cost follows how much changed, not how much has burned. Half-resolution
+  shoreline blur cuts the one-time bake hitch.
 - **No per-frame string garbage** — the flame/ember/smoke fills reuse interned
   `rgb()` strings (colour quantized to 16 levels, exact opacity via `globalAlpha`)
   instead of building `rgba(…)` strings every draw, eliminating GC micro-stutters.
