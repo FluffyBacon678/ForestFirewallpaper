@@ -6080,17 +6080,19 @@ function renderScene() {
         ctx.strokeStyle = "rgba(180,210,240,0.65)";
         ctx.lineWidth = 1.2;
         ctx.lineCap = "round";
+        // Every drop shares one style → one path, one stroke (a storm is ~1200 drops;
+        // they used to be 1200 separate beginPath/stroke calls).
+        ctx.beginPath();
         for (const r of rainDrops) {
             const rx = drawX(r), ry = drawY(r);
             // Direction = velocity (normalized × streak length)
             const sp = Math.hypot(r.vx, r.vy) || 1;
             const dx = (r.vx / sp) * r.len;
             const dy = (r.vy / sp) * r.len;
-            ctx.beginPath();
             ctx.moveTo(rx, ry);
             ctx.lineTo(rx - dx, ry - dy);
-            ctx.stroke();
         }
+        ctx.stroke();
     }
     // Splash droplets where the douse-rain lands
     if (rainSplash.length) {
