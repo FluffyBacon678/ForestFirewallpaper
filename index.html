@@ -248,6 +248,12 @@ const NEIGHBOURS = [
     [-1, 0],        [ 1, 0],
     [-1, 1],[ 0, 1],[ 1, 1],
 ];
+// Per-tick fire-sim tables (filled at the top of update()): flat grid-index offset
+// and downwind spread bonus for each NEIGHBOURS entry, plus a reused buffer for the
+// burning-cell list — the burn loop is the sim's hot path at a big fire.
+const NB_OFF  = new Int32Array(8);
+const NB_WIND = new Float32Array(8);
+let burnList  = new Int32Array(0);
 
 const TREE_NUM_VARIANTS  = 18;  // 9 species × 2 sizes
 const TREE_SWAY_SLOTS    = TREE_NUM_VARIANTS * 32;  // sway tables: (treeVar << 5) | (i & 31)
@@ -418,20 +424,22 @@ let glowHalf = null, glowHalfCtx = null; // half-res scratch for the glow blur
 // back to the 2D path below — same look, just CPU-bound (the original behaviour).
 let glowGPU = false;          // true once the GL glow is live
 let glGlow = null;            // { canvas, gl, prog, locs, quadBuf, instBuf, ext }
-const GLOW_INST_FLOATS = 8;   // center.xy, radius.xy, color.rgb, alpha
+const GLOW_INST_FLOATS = 9;   // center.xy, radius.xy, color.rgb, alpha, angle
 // Three instance lists, all drawn through the same instanced program, all in SCREEN
 // px (so they bound naturally to the viewport at any zoom):
 //  • glowInst  — the fire glow (additive; composited over the fire's screen bbox).
 //  • fxInst    — flame plumes / sparks / embers (additive, one draw).
-//                (Also borrowed briefly at the tree pass for spring blossom dabs.)
+//                (Also borrowed briefly, and composited at once, by the ground-level
+//                 ash smoulder pass and the tree pass's spring blossom dabs.)
 //  • smokeInst — smoke puffs (alpha-blended).
+// The angle rotates an elliptical blob — a thin rotated one draws a glowing crack.
 // Glow and flames stay in SEPARATE buffers on purpose: the Fire-glow slider (and Low
 // quality's dimmer glow) scales the glow buffer AFTER it saturates, which only a
 // separate composite can express. (At the default strength of 1.0 a merged buffer
 // would look identical — additive blends saturate the same either way.)
-let glowInst = new Float32Array(8192 * 8); let glowInstCount = 0;
-let fxInst = new Float32Array(4096 * 8);   let fxInstCount = 0;
-let smokeInst = new Float32Array(2048 * 8); let smokeInstCount = 0;
+let glowInst = new Float32Array(8192 * GLOW_INST_FLOATS); let glowInstCount = 0;
+let fxInst = new Float32Array(8192 * GLOW_INST_FLOATS);   let fxInstCount = 0;
+let smokeInst = new Float32Array(2048 * GLOW_INST_FLOATS); let smokeInstCount = 0;
 let emit2DCtx = null;         // which 2D ctx the *fallback* emitters draw into
 
 function initGlowGL() {
@@ -448,10 +456,11 @@ function initGlowGL() {
 
         const vsSrc =
             "attribute vec2 aCorner;attribute vec2 aCenter;attribute vec2 aRadius;" +
-            "attribute vec3 aColor;attribute float aAlpha;" +
+            "attribute vec3 aColor;attribute float aAlpha;attribute float aAngle;" +
             "uniform vec2 uOrigin;uniform vec2 uViewport;" +
             "varying vec2 vUV;varying vec3 vColor;varying float vAlpha;" +
-            "void main(){vec2 wp=aCenter+aCorner*aRadius;" +
+            "void main(){vec2 c=aCorner*aRadius;float cs=cos(aAngle),sn=sin(aAngle);" +
+            "vec2 wp=aCenter+vec2(c.x*cs-c.y*sn,c.x*sn+c.y*cs);" +
             "vec2 rel=(wp-uOrigin)/uViewport;" +
             "gl_Position=vec4(rel.x*2.0-1.0,1.0-rel.y*2.0,0.0,1.0);" +
             "vUV=aCorner*0.5+0.5;vColor=aColor;vAlpha=aAlpha;}";
@@ -504,6 +513,7 @@ function initGlowGL() {
             aRadius: gl.getAttribLocation(prog, "aRadius"),
             aColor: gl.getAttribLocation(prog, "aColor"),
             aAlpha: gl.getAttribLocation(prog, "aAlpha"),
+            aAngle: gl.getAttribLocation(prog, "aAngle"),
             uOrigin: gl.getUniformLocation(prog, "uOrigin"),
             uViewport: gl.getUniformLocation(prog, "uViewport"),
             uSprite: gl.getUniformLocation(prog, "uSprite")
@@ -545,6 +555,7 @@ function emitGlow(cx, cy, rx, ry, R, G, B, A) {
         let o = glowInstCount * GLOW_INST_FLOATS;
         glowInst[o] = (cx - camX) * z; glowInst[o + 1] = (cy - camY) * z; glowInst[o + 2] = rx * z; glowInst[o + 3] = ry * z;
         glowInst[o + 4] = R / 255; glowInst[o + 5] = G / 255; glowInst[o + 6] = B / 255; glowInst[o + 7] = A;
+        glowInst[o + 8] = 0;
         glowInstCount++;
     } else {
         glowCtx.globalAlpha = A;
@@ -556,10 +567,11 @@ function emitGlow(cx, cy, rx, ry, R, G, B, A) {
     }
 }
 
-// Screen-space additive flame effects (plume segs, sparks, embers). GPU packs a
-// screen-px instance into fxInst; 2D draws straight onto emit2DCtx (the original
-// 'lighter' path). World point (cx,cy) → screen via the camera + view-zoom.
-function emitFx(cx, cy, rx, ry, R, G, B, A) {
+// Screen-space additive flame effects (plume segs, sparks, embers, ash coals). GPU
+// packs a screen-px instance into fxInst; 2D draws straight onto emit2DCtx (the
+// original 'lighter' path). World point (cx,cy) → screen via the camera + view-zoom.
+// `ang` (radians) rotates an elliptical blob.
+function emitFx(cx, cy, rx, ry, R, G, B, A, ang = 0) {
     if (A <= 0) return; if (A > 1) A = 1;
     if (glowGPU) {
         if ((fxInstCount + 1) * GLOW_INST_FLOATS > fxInst.length) {
@@ -569,6 +581,7 @@ function emitFx(cx, cy, rx, ry, R, G, B, A) {
         let o = fxInstCount * GLOW_INST_FLOATS;
         fxInst[o] = sx; fxInst[o + 1] = sy; fxInst[o + 2] = rx * z; fxInst[o + 3] = ry * z;
         fxInst[o + 4] = R / 255; fxInst[o + 5] = G / 255; fxInst[o + 6] = B / 255; fxInst[o + 7] = A;
+        fxInst[o + 8] = ang;
         fxInstCount++;
     } else {
         const c = emit2DCtx;
@@ -576,7 +589,7 @@ function emitFx(cx, cy, rx, ry, R, G, B, A) {
         c.fillStyle = rgbQ(R, G, B);
         c.beginPath();
         if (rx === ry) c.arc(cx, cy, rx, 0, 6.2831853);
-        else c.ellipse(cx, cy, rx, ry, 0, 0, 6.2831853);
+        else c.ellipse(cx, cy, rx, ry, ang, 0, 6.2831853);
         c.fill();
     }
 }
@@ -592,6 +605,7 @@ function emitSmoke(cx, cy, r, R, G, B, A) {
         let o = smokeInstCount * GLOW_INST_FLOATS;
         smokeInst[o] = sx; smokeInst[o + 1] = sy; smokeInst[o + 2] = r * z; smokeInst[o + 3] = r * z;
         smokeInst[o + 4] = R / 255; smokeInst[o + 5] = G / 255; smokeInst[o + 6] = B / 255; smokeInst[o + 7] = A;
+        smokeInst[o + 8] = 0;
         smokeInstCount++;
     } else {
         const c = emit2DCtx;
@@ -620,6 +634,7 @@ function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     if (count === 0) return g.canvas;
 
     gl.useProgram(g.prog);
+    glResetAttribs(gl);
     gl.blendFunc(gl.ONE, additive ? gl.ONE : gl.ONE_MINUS_SRC_ALPHA);
     gl.uniform2f(L.uOrigin, ox, oy);
     gl.uniform2f(L.uViewport, vw, vh);
@@ -644,8 +659,17 @@ function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     bind(L.aRadius, 2, 8);
     bind(L.aColor, 3, 16);
     bind(L.aAlpha, 1, 28);
+    bind(L.aAngle, 1, 32);
     ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, count);
     return g.canvas;
+}
+
+// The glow and tree programs share one context, and vertex-attribute enable state
+// is global to it: an array left enabled by the other program can point at a buffer
+// that's too short for this draw's instance count (an INVALID_OPERATION that would
+// silently drop the draw). Start every draw from a clean slate.
+function glResetAttribs(gl) {
+    for (let a = 0; a < 8; a++) gl.disableVertexAttribArray(a);
 }
 
 // ── GPU instanced trees (optional, guarded) ─────────────────────────────────
@@ -748,6 +772,7 @@ function flushTreesGL(vw, vh) {
     if (treeInstCount === 0) return g.canvas;
     uploadTreeAtlas();
     gl.useProgram(glTree.prog);
+    glResetAttribs(gl);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // premultiplied source-over
     gl.uniform2f(L.uViewport, vw, vh);
     gl.uniform2f(L.uAtlas, treeScaled.width, treeScaled.height);
@@ -911,13 +936,19 @@ let waterMaskBlurCtx = null;
 let terrainCanvas = null;
 let terrainCtx    = null;
 let terrainDirty  = true;
-let lastStaticSec = 0;                      // wall-clock time of the last scar-layer rebuild
-let staticCamX = -1e9, staticCamY = -1e9;  // camera at last static rebuild (visible-region refresh)
 let staticForceFull = true;                // next rebuild does the whole world (worldgen/resize)
-// Re-bake the scar layer at most this often (wall-clock, not frame count) so a
-// 144/240Hz monitor doesn't run the ~3ms rebuild several times more per second than
-// a 60Hz one. 0.05s ≈ the old 3-frame gap at 60fps, so 60fps behaviour is unchanged.
-const STATIC_REBUILD_MIN_SEC = 0.05;
+// The scar layer is re-baked in TILES of STATIC_TILE×STATIC_TILE cells, and only the
+// tiles a change actually touched. It used to re-bake the whole visible window on
+// any change (and every 180px of panning) — after a big fire that's ~15k scar cells,
+// ~17 ms on every 3rd frame for as long as the scars kept ageing. Now the cost
+// follows what changed, and a per-frame time budget spreads a burst of changes over
+// a few frames instead of spiking one. (Scar stages evolve over seconds, so a frame
+// or two of lag on a tile is invisible.)
+const STATIC_TILE = 16;
+const STATIC_BAKE_BUDGET_MS = 3;
+let staticTilesX = 0, staticTilesY = 0;
+let staticTileDirty = new Uint8Array(0);
+let staticTileCursor = 0;                  // round-robin start, so no tile is starved
 
 // FPS + fixed-timestep simulation
 let lastFrameMs   = 0;
@@ -2997,7 +3028,7 @@ function douseAt(px, py, radius) {
             grid[i] = isTree ? ASH_TREE : ASH_GRASS;
             burnTimer[i] = (isTree ? 660 : 480) + Math.random() * 460;
             burningCount--;
-            markStaticDirty();
+            markStaticDirty(i);
             if (isTree) treeContentDirty = 12;
             // A little hiss of steam where a flame is doused
             if (smokeParticles.length < MAX_SMOKE && Math.random() < 0.7) {
@@ -3554,7 +3585,7 @@ function updateRain(dt) {
                             grid[i] = isTree ? ASH_TREE : ASH_GRASS;
                             burnTimer[i] = (isTree ? 660 : 480) + Math.random() * 460;
                             burningCount--;
-                            markStaticDirty();
+                            markStaticDirty(i);
                             if (isTree) treeContentDirty = 12;    // tree vanished → fast banded refresh (no full-rebuild spike)
                             // Steam puff (light, wispy)
                             if (smokeParticles.length < MAX_SMOKE) {
@@ -3738,17 +3769,40 @@ function update(dt = SIM_DT) {
         if (chance > 0 && Math.random() < chance * dt) randomSpark();
     }
 
-    // Collect currently-burning cells so spread uses current state
-    const burningList = [];
-    for (let i = 0; i < grid.length; i++) {
-        const s = grid[i];
-        if (s === BURN_GRASS || s === BURN_TREE) burningList.push(i);
+    // Collect currently-burning cells so spread uses current state. Into a reused
+    // typed buffer (no per-tick array + growth), and no grid scan at all when nothing
+    // burns — burningCount is exact, since igniteCell is the only way into a burning
+    // state and every exit decrements it.
+    if (burnList.length < grid.length) burnList = new Int32Array(grid.length);
+    let nBurn = 0;
+    if (burningCount > 0) {
+        for (let i = 0, n = grid.length; i < n; i++) {
+            const s = grid[i];
+            if (s === BURN_GRASS || s === BURN_TREE) burnList[nBurn++] = i;
+        }
     }
 
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
-    for (let k = 0; k < burningList.length; k++) {
-        const i = burningList[k];
+    // Per-tick constants for the hot loop below: flat neighbour offsets + downwind
+    // spread bonus (no nested-array loads, idx() calls or per-neighbour wind maths),
+    // the heat-smoothing factor (was a Math.pow per burning cell), and the toggles +
+    // particle caps (read once instead of per cell). Caps stay un-truncated floats so
+    // every comparison is exactly what it was.
+    for (let d = 0; d < 8; d++) {
+        const ndx = NEIGHBOURS[d][0], ndy = NEIGHBOURS[d][1];
+        NB_OFF[d] = ndy * cols + ndx;
+        const wb = ndx * wxN + ndy * wyN;
+        NB_WIND[d] = wb > 0 ? wb : 0;
+    }
+    const heatK = 1 - damp(0.75, dt);
+    const showSmoke = props.showSmoke, showEmbers = props.showEmbers, showPlumes = props.showFlamePlumes;
+    const smokeCap = MAX_SMOKE * qMul, emberCap = MAX_EMBERS * qMul;
+    const sparkCap = MAX_SPARKS * qMul, plumeCap = MAX_PLUMES * qMul;
+    const colsM1 = cols - 1, rowsM1 = rows - 1;
+
+    for (let k = 0; k < nBurn; k++) {
+        const i = burnList[k];
         burnTimer[i] -= dt;
 
         const isTree = grid[i] === BURN_TREE;
@@ -3758,7 +3812,7 @@ function update(dt = SIM_DT) {
             burnTimer[i] = (isTree ? 660 : 480) + Math.random() * 460;  // short smoulder phase
             fireHeat[i] = 0;
             burningCount--;
-            markStaticDirty(); // grass tuft → ash patch baked
+            markStaticDirty(i); // grass tuft → ash patch baked
             if (isTree) treeContentDirty = 12;    // tree vanished → fast banded refresh (no full-rebuild spike)
             continue;
         }
@@ -3777,33 +3831,35 @@ function update(dt = SIM_DT) {
 
         // --- Count burning neighbours (clustering "blaze" heat) + fresh-fuel
         //     neighbours (the advancing front) + spread ---
+        // Interior cells (the vast majority) use the flat offsets with no bounds
+        // checks; only edge cells take the checked path. Same neighbour order and the
+        // same random draws as before, so spread behaves identically.
         let burningNeighbors = 0, fuelNeighbors = 0;
-        for (let d = 0; d < NEIGHBOURS.length; d++) {
-            const dx = NEIGHBOURS[d][0];
-            const dy = NEIGHBOURS[d][1];
-            const nx = x + dx;
-            const ny = y + dy;
-            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
-            const ni = idx(nx, ny);
+        const interior = x > 0 && x < colsM1 && y > 0 && y < rowsM1;
+        for (let d = 0; d < 8; d++) {
+            let ni;
+            if (interior) ni = i + NB_OFF[d];
+            else {
+                const nx = x + NEIGHBOURS[d][0], ny = y + NEIGHBOURS[d][1];
+                if (nx < 0 || nx > colsM1 || ny < 0 || ny > rowsM1) continue;
+                ni = ny * cols + nx;
+            }
             const ns = grid[ni];
             if (ns === BURN_TREE || ns === BURN_GRASS) { burningNeighbors++; continue; }
-            if (ns === GRASS || ns === TREE) fuelNeighbors++;
-            if (spreadGate <= 0) continue;
             let spread;
             if (ns === GRASS)      spread = sg;
             else if (ns === TREE)  spread = st;
             else continue;
-            const windBonus = dx * wxN + dy * wyN;
-            const chance = (spread + Math.max(0, windBonus)) * spreadGate;
-            if (chance > 0 && Math.random() < chance * dt) {
-                igniteCell(ni);
-            }
+            fuelNeighbors++;
+            if (spreadGate <= 0) continue;
+            const chance = (spread + NB_WIND[d]) * spreadGate;
+            if (chance > 0 && Math.random() < chance * dt) igniteCell(ni);
         }
 
         // Heat 0..1 from neighbour density, smoothed toward the new value so a
         // packed blaze ramps up its glow rather than snapping.
         const heatTarget = burningNeighbors / 8;
-        fireHeat[i] += (heatTarget - fireHeat[i]) * (1 - damp(0.75, dt));
+        fireHeat[i] += (heatTarget - fireHeat[i]) * heatK;
         const heat = fireHeat[i];
 
         // Effective output scales with how big the flame currently is (intensity)
@@ -3811,7 +3867,7 @@ function update(dt = SIM_DT) {
         const output = intensity * (1 + heat * 0.6);
 
         // Smoke — little while smoldering, billowing at blaze peak
-        if (props.showSmoke && smokeParticles.length < (MAX_SMOKE * qMul) | 0) {
+        if (showSmoke && smokeParticles.length < smokeCap) {
             const smokeChance = (isTree ? 0.11 : 0.05) * output;
             if (Math.random() < smokeChance * dt) {
                 const sMag = 0.7 * props.windStrength;
@@ -3837,7 +3893,7 @@ function update(dt = SIM_DT) {
         // Smolder wisp — a thin, slow grey curl even when barely flaming, so a cell
         // that's just catching or burning out visibly smoulders.
         const smolderAmt = Math.max(0, 1 - intensity * 1.4);
-        if (props.showSmoke && smolderAmt > 0.12 && smokeParticles.length < (MAX_SMOKE * qMul) | 0
+        if (showSmoke && smolderAmt > 0.12 && smokeParticles.length < smokeCap
             && Math.random() < (isTree ? 0.05 : 0.035) * smolderAmt * dt) {
             spawnSmoke(
                 x * cell + cell * 0.5 + (Math.random() - 0.5) * cell * 0.5,
@@ -3851,8 +3907,8 @@ function update(dt = SIM_DT) {
 
         // Creeping front — the advancing edge throws extra sparks as it eats fresh
         // fuel, so a spreading fire's leading line crackles with life.
-        if (fuelNeighbors > 0 && props.showEmbers && intensity > 0.04 && intensity < 0.7
-            && sparks.length < (MAX_SPARKS * qMul) | 0 && Math.random() < 0.10 * dt) {
+        if (fuelNeighbors > 0 && showEmbers && intensity > 0.04 && intensity < 0.7
+            && sparks.length < sparkCap && Math.random() < 0.10 * dt) {
             const n = 1 + (Math.random() * 2 | 0);
             for (let sN = 0; sN < n; sN++) {
                 sparks.push({
@@ -3866,7 +3922,7 @@ function update(dt = SIM_DT) {
 
         // Settle / log-shift — a hot clustered spot occasionally "collapses" with a
         // shower of sparks and a few lifting embers, like a log settling in a fire.
-        if (props.showEmbers && heat > 0.5 && Math.random() < 0.0006 * dt) {
+        if (showEmbers && heat > 0.5 && Math.random() < 0.0006 * dt) {
             const ns = 4 + (Math.random() * 5 | 0);
             for (let sN = 0; sN < ns && sparks.length < (MAX_SPARKS * qMul); sN++) {
                 sparks.push({
@@ -3883,7 +3939,7 @@ function update(dt = SIM_DT) {
         }
 
         // Embers — more thrown from a roaring, clustered blaze
-        if (props.showEmbers && embers.length < (MAX_EMBERS * qMul) | 0) {
+        if (showEmbers && embers.length < emberCap) {
             const emberChance = (isTree ? 0.10 : 0.025) * output;
             if (Math.random() < emberChance * dt) {
                 spawnEmber(
@@ -3899,7 +3955,7 @@ function update(dt = SIM_DT) {
 
         // Flame tongues — frequency AND size grow with the flame's intensity + heat.
         // Each gets a random shape "kind" + a curl direction so the fire is varied.
-        if (props.showFlamePlumes && flamePlumes.length < (MAX_PLUMES * qMul) | 0) {
+        if (showPlumes && flamePlumes.length < plumeCap) {
             // Low-intensity floor: even a smoldering/creeping cell throws the odd
             // small lick, so a low burn flickers with little flames instead of
             // sitting as static glow dots. Tapers off as the blaze intensifies
@@ -3934,7 +3990,7 @@ function update(dt = SIM_DT) {
                     curl: (Math.random() - 0.5) * 1.6,     // sideways lick
                 });
                 // Crackling sparks pop off vigorous, hot flames
-                if (props.showEmbers && sparks.length < (MAX_SPARKS * qMul) | 0
+                if (showEmbers && sparks.length < sparkCap
                     && Math.random() < (0.12 + heat * 0.3) * intensity * dt) {
                     const n = 1 + (Math.random() * 2 | 0);
                     for (let sN = 0; sN < n; sN++) {
@@ -3973,7 +4029,7 @@ function update(dt = SIM_DT) {
             if (burnTimer[i] <= 0) {
                 grid[i] = CHARRED;
                 burnTimer[i] = 450 + Math.random() * 600;   // fresh char, first of several scar stages
-                markStaticDirty();
+                markStaticDirty(i);
                 continue;
             }
             // Smoulder: fresh ash occasionally pops a tiny ember
@@ -4009,7 +4065,7 @@ function update(dt = SIM_DT) {
             if (burnTimer[i] <= 0) {
                 grid[i] = CHAR_COOL;
                 burnTimer[i] = 550 + Math.random() * 800;
-                markStaticDirty();
+                markStaticDirty(i);
             }
         } else if (s === CHAR_COOL) {
             // Ash weathers away, exposing bare scorched earth.
@@ -4018,7 +4074,7 @@ function update(dt = SIM_DT) {
                 grid[i] = SCORCH;
                 burnTimer[i] = 650 + Math.random() * 950;
                 terrainRestoreDirt(i);   // clear pre-fire baked grass; scorch covers it opaquely
-                markStaticDirty();
+                markStaticDirty(i);
             }
         } else if (s === SCORCH) {
             // Bare burnt earth. With regrowth on, pioneers break through; otherwise
@@ -4028,7 +4084,7 @@ function update(dt = SIM_DT) {
                 if (burnTimer[i] <= 0) {
                     grid[i] = SPROUT;
                     burnTimer[i] = 500 + Math.random() * 700;
-                    markStaticDirty();
+                    markStaticDirty(i);
                 }
             }
         } else if (s === SPROUT) {
@@ -4376,7 +4432,19 @@ function update(dt = SIM_DT) {
 // ============================================================
 // Static-layer cache (water/paths/grass/rocks/ash baked together)
 // ============================================================
-function markStaticDirty() { staticDirty = true; }
+// A state change at cell i can alter scar-layer pixels up to 2 cells away: its own
+// drawing, its neighbours' receded-edge flags, and their ≤1-cell spill (tree-ash
+// discs, sprout blades). So dirty every tile that 5×5 block touches. No index →
+// everything (legacy callers / unknown change).
+function markStaticDirty(i) {
+    staticDirty = true;
+    if (staticForceFull) return;                       // a full bake is already queued
+    if (i === undefined || !staticTilesX) { staticTileDirty.fill(1); return; }
+    const y = (i / cols) | 0, x = i - y * cols;
+    const tx0 = (Math.max(0, x - 2) / STATIC_TILE) | 0, tx1 = (Math.min(cols - 1, x + 2) / STATIC_TILE) | 0;
+    const ty0 = (Math.max(0, y - 2) / STATIC_TILE) | 0, ty1 = (Math.min(rows - 1, y + 2) / STATIC_TILE) | 0;
+    for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) staticTileDirty[ty * staticTilesX + tx] = 1;
+}
 function markTerrainDirty() { terrainDirty = true; staticDirty = true; staticForceFull = true; }
 
 // Incremental terrain edits — update a single cell on the baked terrain canvas
@@ -4388,7 +4456,7 @@ function terrainDrawGrass(i) {
     const y = (i / cols) | 0, x = i - y * cols;
     terrainCtx.drawImage(grassSprites, grassVar[i] * grassSpW, 0, grassSpW, grassSpH,
                          x * cell, y * cell, grassSpW, grassSpH);
-    markStaticDirty();
+    markStaticDirty(i);
 }
 function terrainRestoreDirt(i) {
     if (!terrainCanvas) { markTerrainDirty(); return; }
@@ -4397,7 +4465,7 @@ function terrainRestoreDirt(i) {
     // Repaint the bare dirt background for this one cell (clears baked grass)
     terrainCtx.drawImage(bgCanvas, x * cell, y * cell, cell, cell,
                          x * cell, y * cell, cell, cell);
-    markStaticDirty();
+    markStaticDirty(i);
 }
 
 // Bake the worldgen-static terrain (dirt + water + paths + lily pads + rocks).
@@ -4646,33 +4714,77 @@ function renderStaticLayer() {
         staticCanvas.height = worldPxH;
         staticForceFull = true;   // fresh canvas → bake the whole thing once
     }
+    const tX = Math.ceil(cols / STATIC_TILE), tY = Math.ceil(rows / STATIC_TILE);
+    if (tX !== staticTilesX || tY !== staticTilesY) {
+        staticTilesX = tX; staticTilesY = tY;
+        staticTileDirty = new Uint8Array(tX * tY);
+        staticForceFull = true;
+    }
     if (terrainDirty) bakeTerrain();
 
     const sc = staticCtx;
-    const w = staticCanvas.width;
-    const h = staticCanvas.height;
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
-    // Refresh only the VISIBLE world window (+ margin) — off-screen scars are
-    // never composited, and panning to a new area triggers another rebuild. A
-    // full-world refresh only runs on worldgen/resize (staticForceFull).
-    // Visible world extent grows when zoomed out (viewZoom < 1) so scars near the
-    // screen edge are still composited instead of popping in.
-    const vw = Math.ceil(canvas.width / viewZoom), vh = Math.ceil(canvas.height / viewZoom);
-    const SM = cell * 2 + 220;
-    let sx0, sy0, sx1, sy1;
-    if (staticForceFull) { sx0 = 0; sy0 = 0; sx1 = w; sy1 = h; }
-    else {
-        sx0 = Math.max(0, (camX - SM) | 0); sy0 = Math.max(0, (camY - SM) | 0);
-        sx1 = Math.min(w, (camX + vw + SM) | 0); sy1 = Math.min(h, (camY + vh + SM) | 0);
+    if (staticForceFull) {
+        // Worldgen / resize / terrain re-bake: the whole world, once.
+        sc.clearRect(0, 0, staticCanvas.width, staticCanvas.height);
+        sc.drawImage(terrainCanvas, 0, 0);
+        drawScarCells(sc, cell, 0, 0, cols - 1, rows - 1);
+        staticTileDirty.fill(0);
+        staticForceFull = false; staticDirty = false;
+        return 1;
     }
-    sc.clearRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
-    sc.drawImage(terrainCanvas, sx0, sy0, sx1 - sx0, sy1 - sy0, sx0, sy0, sx1 - sx0, sy1 - sy0);
-    staticCamX = camX; staticCamY = camY; staticForceFull = false;
 
-    // ---- Burn states: smouldering ash, then cold charred-earth scars ----
-    const scx0 = Math.max(0, (sx0 / cell) | 0), scx1 = Math.min(cols - 1, Math.ceil(sx1 / cell));
-    const scy0 = Math.max(0, (sy0 / cell) | 0), scy1 = Math.min(rows - 1, Math.ceil(sy1 / cell));
+    // Incremental: re-bake the dirty tiles in (or just around) the view. Off-screen
+    // scars are never composited, so their tiles simply stay dirty until panned into
+    // view. Time-budgeted per frame (always ≥1 tile, round-robin so none starves).
+    // Visible world extent grows when zoomed out (viewZoom < 1).
+    const vw = Math.ceil(canvas.width / viewZoom), vh = Math.ceil(canvas.height / viewZoom);
+    const SM = cell * 2 + 220, span = cell * STATIC_TILE;
+    const tx0 = Math.max(0, ((camX - SM) / span) | 0), tx1 = Math.min(tX - 1, ((camX + vw + SM) / span) | 0);
+    const ty0 = Math.max(0, ((camY - SM) / span) | 0), ty1 = Math.min(tY - 1, ((camY + vh + SM) / span) | 0);
+    const nW = tx1 - tx0 + 1, nT = nW * (ty1 - ty0 + 1);
+    if (nW <= 0 || nT <= 0) return 0;
+    const t0 = performance.now();
+    let baked = 0;
+    staticDirty = false;
+    for (let k = 0; k < nT; k++) {
+        const kk = (staticTileCursor + k) % nT;
+        const tx = tx0 + kk % nW, ty = ty0 + ((kk / nW) | 0);
+        const ti = ty * tX + tx;
+        if (!staticTileDirty[ti]) continue;
+        if (baked > 0 && performance.now() - t0 > STATIC_BAKE_BUDGET_MS) {
+            staticTileCursor = kk; staticDirty = true;      // resume here next frame
+            break;
+        }
+        staticTileDirty[ti] = 0;
+        bakeStaticTile(sc, cell, tx, ty);
+        baked++;
+    }
+    return baked;
+}
+
+// Re-bake one tile exactly as a full rebuild would leave it: clip to the tile, lay
+// the terrain back, then redraw every cell that can reach into it — the tile's own
+// cells plus a 1-cell ring (spill ≤ 1 cell) — in the same row-major order. Every
+// scar draw is a pure function of the grid, so the tile's pixels match a full bake.
+function bakeStaticTile(sc, cell, tx, ty) {
+    const cx0 = tx * STATIC_TILE, cy0 = ty * STATIC_TILE;
+    const cx1 = Math.min(cols, cx0 + STATIC_TILE) - 1, cy1 = Math.min(rows, cy0 + STATIC_TILE) - 1;
+    const px = cx0 * cell, py = cy0 * cell, pw = (cx1 - cx0 + 1) * cell, ph = (cy1 - cy0 + 1) * cell;
+    sc.save();
+    sc.beginPath();
+    sc.rect(px, py, pw, ph);
+    sc.clip();
+    sc.clearRect(px, py, pw, ph);
+    sc.drawImage(terrainCanvas, px, py, pw, ph, px, py, pw, ph);
+    drawScarCells(sc, cell, Math.max(0, cx0 - 1), Math.max(0, cy0 - 1),
+                  Math.min(cols - 1, cx1 + 1), Math.min(rows - 1, cy1 + 1));
+    sc.restore();
+}
+
+// ---- Burn states: smouldering ash, then cold charred-earth scars ----
+function drawScarCells(sc, cell, scx0, scy0, scx1, scy1) {
     for (let y = scy0; y <= scy1; y++) {
         const rowBase = y * cols;
         for (let x = scx0; x <= scx1; x++) {
@@ -4796,9 +4908,6 @@ function renderStaticLayer() {
             if (clipped) sc.restore();
         }
     }
-
-    staticDirty = false;
-    lastStaticSec = renderTimeSec;
 }
 
 // ============================================================
@@ -4865,21 +4974,13 @@ function renderScene() {
     const h = canvas.height;
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
 
-    // Background: cached static layer (dirt + water + paths + grass + rocks + ash)
-    // Rebuild on a scar change OR when the camera has panned far enough to reveal
-    // un-baked world (the static layer now only refreshes its visible window).
-    const staticMoved = Math.abs(camX - staticCamX) > 180 || Math.abs(camY - staticCamY) > 180;
-    // Frame-pacing: track when a heavy rebuild runs this frame so the tree-band
-    // rebuild (further down) can yield and never collide with it into one spike.
-    let heavyJobThisFrame = false;
-    // ALWAYS rebuild if the cached layer is missing or the wrong size (first frame,
-    // after a resize/worldgen) — that must never be gated, or the blit below reads a
-    // null/stale canvas. Otherwise rate-limit dirty/moved rebuilds by wall-clock time.
-    const staticStale = !staticCanvas || staticCanvas.width !== worldPxW || staticCanvas.height !== worldPxH || staticForceFull;
-    if (staticStale ||
-        ((staticDirty || staticMoved) && (renderTimeSec - lastStaticSec) >= STATIC_REBUILD_MIN_SEC)) {
-        renderStaticLayer(); heavyJobThisFrame = true;
-    }
+    // Background: cached static layer (dirt + water + paths + grass + rocks + ash).
+    // Re-baked tile-by-tile only where scars changed, within a time budget — a cheap
+    // no-op when nothing in view is dirty. A missing / wrong-size layer (first frame,
+    // resize, worldgen) is always fully baked first, so the blit below never reads a
+    // stale canvas. Frame-pacing: note when a bake ran so the 2D tree-band rebuild
+    // (further down) can yield and never collide with it into one spike.
+    let heavyJobThisFrame = renderStaticLayer() > 0;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
     // Shift into world space for the camera + apply the scroll-wheel view zoom:
@@ -4972,6 +5073,57 @@ function renderScene() {
     const sx1 = Math.min(cols - 1, Math.ceil((camX + vw) / cell));
     const sy0 = Math.max(0, (camY / cell) | 0);
     const sy1 = Math.min(rows - 1, Math.ceil((camY + vh) / cell));
+    if (glowGPU) {
+        // GPU: after a big fire EVERY cell is hot ash — 2–4 CPU arc()/stroke() per
+        // cell was ~17k draw calls a frame at 4K (30–600 ms frames while a blaze
+        // burned down). Same coals as the 2D path below, queued as instances and
+        // drawn in ONE call. The soft sprite averages ~¼ the opacity of a hard 2D
+        // disc across its radius, so blobs are drawn at 2× radius (same peak, same
+        // total light); cracks are thin rotated blobs.
+        const SOFT = 2;
+        fxInstCount = 0;   // borrowed; composited right here, reset again by the plumes
+        for (let y = sy0; y <= sy1; y++) {
+            const rowBase = y * cols;
+            for (let x = sx0; x <= sx1; x++) {
+                const i = rowBase + x;
+                const s = grid[i];
+                if (s !== ASH_TREE && s !== ASH_GRASS) continue;
+                const heat = Math.min(1, burnTimer[i] / 620);
+                if (heat <= 0.05) continue;
+                const hsh = ((i * 2654435761) >>> 0) / 4294967296;
+                const fl = 0.6 + 0.4 * Math.sin(renderTimeSec * 3.4 + hsh * 40);
+                const ax = x * cell + cell * 0.5 + jitterX[i];
+                const ay = y * cell + cell * 0.5 + jitterY[i];
+                const g = (40 + hsh * 95) | 0;
+                const b = (8 + hsh * 22) | 0;
+                const ur = cell * 0.62 * SOFT;
+                emitFx(ax, ay, ur, ur, 206 + ((hsh * 34) | 0), (g * 0.6) | 0, b, heat * 0.15 * fl);
+                const cr0 = Math.max(1, cell * (0.12 + hsh * 0.08)) * SOFT;
+                emitFx(ax, ay, cr0, cr0, 255, g + 45, b + 12, heat * 0.42 * fl);
+                if (hsh < 0.4 && heat > 0.28) {
+                    // A soft blob only reaches full strength on its centre line and
+                    // tapers to its tips, so it carries ~half a hard 1px stroke's light:
+                    // longer + brighter keeps the crisp X of glowing fissures readable.
+                    const a1 = hsh * 6.28, cr = cell * 0.34 * 1.35, ca = heat * 0.34 * 1.8 * fl, cg = (g * 0.7) | 0;
+                    emitFx(ax, ay, cr, 1.1, 255, cg, b, ca, a1);
+                    emitFx(ax, ay, cr * 0.7, 1.1, 255, cg, b, ca, a1 + 2.1);
+                }
+                if (Math.random() < 0.004 * heat * renderDtSec * 60) {
+                    const pr = cell * (0.16 + Math.random() * 0.1) * SOFT;
+                    emitFx(ax, ay, pr, pr, 255, 224, 160, 0.32 * heat);
+                }
+            }
+        }
+        if (fxInstCount > 0) {
+            const sc = glDrawInstanced(fxInst, fxInstCount, 0, 0, w, h, true);
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalCompositeOperation = "lighter";
+            ctx.globalAlpha = 1;
+            ctx.drawImage(sc, 0, 0, w, h, 0, 0, w, h);
+            ctx.restore();
+        }
+    } else {
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     for (let y = sy0; y <= sy1; y++) {
@@ -5030,6 +5182,7 @@ function renderScene() {
     }
     ctx.globalAlpha = 1;
     ctx.restore();
+    }   // end 2D smoulder fallback
     }
 
     // Glowing-mushroom halos — soft cyan pulse at ground level (below trees, so a
