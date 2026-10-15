@@ -5088,8 +5088,13 @@ function terrainDrawGrass(i) {
     if (!terrainCanvas) { markTerrainDirty(); return; }
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const y = (i / cols) | 0, x = i - y * cols;
-    // clear the cell first: a smaller young tuft must not sit on the last stage's bigger one
-    terrainCtx.drawImage(bgCanvas, x * cell, y * cell, cell, cell, x * cell, y * cell, cell, cell);
+    if (grassGrow[i] >= 255) {
+        // fully grown: a feathered patch of moss over the soil (a restore of the moss base was a hard square)
+        paintSoilCell(terrainCtx, i, x, y, cell, mossBlob());
+    } else {
+        // young grass grows out of SOIL, laid as a soft blob (never a hard moss square)
+        paintSoilCell(terrainCtx, i, x, y, cell);
+    }
     drawGrassCell(terrainCtx, i, x, y, cell);
     markStaticDirty(i);
 }
@@ -5111,7 +5116,7 @@ function drawGrassCell(c, i, x, y, cell) {
     // bare soil showing through, fading as the grass fills in
     c.globalAlpha = 0.9 * (1 - g / 255);
     const blob = soilBlob(1);
-    c.drawImage(blob, x * cell - cell * 0.15, y * cell - cell * 0.15, cell * 1.3, cell * 1.3);
+    c.drawImage(blob, x * cell - cell * 0.5, y * cell - cell * 0.5, cell * 2, cell * 2);
     c.globalAlpha = 1;
     const w = grassSpW * st.sc, h = grassSpH * st.sc;
     for (let k = 0; k < st.n; k++) {
@@ -5119,13 +5124,44 @@ function drawGrassCell(c, i, x, y, cell) {
         c.drawImage(grassSprites, sx0, 0, grassSpW, grassSpH, x * cell + (cell - w) / 2 + ox, y * cell + cell - h + oy, w, h);
     }
 }
+// Soft soil patch over one cell: two wide blobs in the local tone (same noise as the baked
+// bare ground), then the grown neighbours' grass is redrawn so the blob's feathered edge
+// doesn't dim it.
+let mossBlobSprite = null;
+function mossBlob() {
+    if (!mossBlobSprite) {
+        const t = document.createElement("canvas"); t.width = t.height = 1;
+        const tc = t.getContext("2d"); tc.drawImage(bgCanvas, 0, 0, 1, 1);      // the moss base's average colour
+        const d = tc.getImageData(0, 0, 1, 1).data;
+        mossBlobSprite = makeRadialSprite([
+            [0, `rgba(${d[0]},${d[1]},${d[2]},1)`], [0.55, `rgba(${d[0]},${d[1]},${d[2]},0.85)`], [1, `rgba(${d[0]},${d[1]},${d[2]},0)`]], 48);
+    }
+    return mossBlobSprite;
+}
+function paintSoilCell(c, i, x, y, cell, blobOverride) {
+    const nz = (valueNoise(x * 0.11, y * 0.11, terrainSeed + 7741) - 0.5) / 0.2;
+    const tone = nz < -0.45 ? 0 : nz < 0.05 ? 1 : nz < 0.55 ? 2 : 3;
+    const blob = blobOverride || soilBlob(tone), sz = cell * 2.5, hh = (i * 2654435761) >>> 0;
+    c.globalAlpha = 1;
+    c.drawImage(blob, x * cell + cell * 0.5 - sz / 2, y * cell + cell * 0.5 - sz / 2, sz, sz);
+    const j = cell * 0.2 * (hash01(hh, 1) - 0.5);
+    c.drawImage(blob, x * cell + cell * 0.5 - sz / 2 + j, y * cell + cell * 0.5 - sz / 2 - j, sz, sz);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+        const k = ny * cols + nx, st = grid[k];
+        if ((st === GRASS || st === TREE || st === BURN_GRASS || st === BURN_TREE) && grassGrow[k] >= 255)
+            c.drawImage(grassSprites, grassVar[k] * grassSpW, 0, grassSpW, grassSpH, nx * cell, ny * cell, grassSpW, grassSpH);
+    }
+}
 function terrainRestoreDirt(i) {
     if (!terrainCanvas) { markTerrainDirty(); return; }
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const y = (i / cols) | 0, x = i - y * cols;
-    // Repaint the bare dirt background for this one cell (clears baked grass)
-    terrainCtx.drawImage(bgCanvas, x * cell, y * cell, cell, cell,
-                         x * cell, y * cell, cell, cell);
+    // Repaint bare soil over this one cell (clears baked grass) as soft overlapping blobs
+    // that melt into the neighbours — a restore from the moss base left a hard square.
+    paintSoilCell(terrainCtx, i, x, y, cell);
     markStaticDirty(i);
 }
 
@@ -5260,6 +5296,7 @@ function bakeTerrain() {
 
     sc.clearRect(0, 0, w, h);
     sc.drawImage(bgCanvas, 0, 0);
+    mossBlobSprite = null;
     paintBareGround(sc, cell);   // (before the water, so a shoreline covers any soil that bleeds under it)
 
     // ---- Water (baked) ----
