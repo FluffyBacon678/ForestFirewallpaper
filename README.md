@@ -167,17 +167,25 @@ Features:
   properties.)
 - **Living sky** — the weather has two layers. The wet↔dry stages above drive rain,
   lightning and fire; on top of them sits a **mood** that changes the light and the air:
-  - **Fog** — drifting banks of mist (two parallax layers) that soften every contrast;
-    flames glow *through* it and bloom brighter; wind stills, fireflies drift out.
-  - **Windy** — a gale: trees sway hard, leaves swirl, wind streaks thicken, gusts come
-    far more often, clouds race.
-  - **Sunset** — golden light with a low sun's glare bleeding in from a corner, warm on
-    the land and the water (and likelier right after rain).
-  - **Night** — a deep moonlit blue with fireflies swarming, mushrooms glowing and fire
-    blazing against the dark. Selectable any time; in the auto-cycle only if you opt in.
-  Each is a continuous level that eases in and out over ~20–60 s — **nothing snaps**:
-  the fire-spread multiplier, drought haze, wind and rain escalation all glide too
-  (they used to jump when the weather changed stage).
+  - **Fog** — drifting banks of mist (two parallax layers) that soften every contrast,
+    plus wisps of mist rising off the ponds; flames glow *through* it and bloom
+    brighter; wind stills, fireflies drift out. Meets a sunset as golden, god-ray-lit mist.
+  - **Windy** — a gale: trees sway hard, leaves swirl and eddy, pale dandelion seeds
+    stream past, wind streaks thicken, gusts come far more often, clouds race.
+  - **Sunset** — golden light with a low sun's glare bleeding in from a corner and
+    **god rays** fanning across the forest, each breathing on its own rhythm; the water
+    throws back more, warmer glints (and it's likelier right after rain).
+  - **Night** — a deep moonlit blue with a cool moon-glare, silvery water glints,
+    fireflies swarming, mushrooms glowing, fire blazing against the dark, and the odd
+    **shooting star**. Selectable any time; in the auto-cycle only if you opt in.
+  Each is a continuous level that eases in **and** out through an S-curve (it starts
+  gently, swells, then settles) over ~25–60 s — **nothing snaps**: the fire-spread
+  multiplier, drought haze, wind and rain escalation glide too (they used to jump when
+  the weather changed stage).
+- **Moods flow into each other** — a sunset-to-night handoff passes through a violet
+  **dusk** glow neither mood has alone (and the same going back to dawn). In the
+  auto-cycle moods follow a day's logic: sunrise comes through mist, dusk follows
+  sunset, a night ends in dawn fog.
 - **Drifting cloud shadows** (on by default) — soft dark masses slide across the forest
   with the wind, falling on the canopy as well as the ground. A faint dapple under a
   clear sky, heavy as cover builds, gone at night. One scrolling noise texture, so it's

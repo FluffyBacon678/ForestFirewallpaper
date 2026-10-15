@@ -224,6 +224,7 @@ let moodTarget = MOOD_NONE;         // the auto-cycle's current mood
 let moodTimer  = 1500;              // base ticks until the auto-cycle picks the next one
 const atmo = {
     fog: 0, gale: 0, gold: 0, night: 0,   // mood levels (0..1)
+    _fog: 0, _gale: 0, _gold: 0, _night: 0,   // their lagged targets (see easeMood)
     dry: 0,                               // drought haze
     cover: 0.1,                           // cloud cover → how strong the cloud shadows are
     fireMul: 1, windMul: 1,               // smoothed fire-spread and wind multipliers
@@ -232,6 +233,8 @@ const atmo = {
 };
 let windNow = 0.5;                  // the wind actually blowing = slider × weather
 let ripples = [];                   // rain rings spreading on the ponds
+let wisps = [];                     // mist rising off the water in fog
+let shootingStar = null;            // an occasional meteor on a clear night
 
 // ============================================================
 // Value noise (for procedural biome terrain)
@@ -480,20 +483,54 @@ function skyTexture(kind) {
 // Fill the whole screen with a scrolling layer of a sky texture. `scale` = screen px
 // per texel; (ox, oy) = scroll offset in screen px. Screen-space; the caller sets the
 // blend mode + alpha.
-function drawSkyLayer(tex, scale, ox, oy, w, h) {
+function drawSkyLayer(c, tex, scale, ox, oy, w, h) {
     if (!tex.pat) tex.pat = ctx.createPattern(tex.canvas, "repeat");
-    ctx.save();
-    ctx.setTransform(scale, 0, 0, scale, ox, oy);
-    ctx.imageSmoothingEnabled = true;
-    ctx.fillStyle = tex.pat;
-    ctx.fillRect(-ox / scale, -oy / scale, w / scale + 1, h / scale + 1);
-    ctx.restore();
+    c.save();
+    c.setTransform(scale, 0, 0, scale, ox, oy);
+    c.imageSmoothingEnabled = true;
+    c.fillStyle = tex.pat;
+    c.fillRect(-ox / scale, -oy / scale, w / scale + 1, h / scale + 1);
+    c.restore();
+}
+
+// Cloud shadows and mist are SOFT, so when a GL fire pass is about to follow they're
+// built in a quarter-resolution buffer and stretched onto the screen once. Drawn
+// straight onto a 4K canvas, the two shadow layers alone cost ~4 ms per frame on a
+// GTX 1050 Ti while a fire was burning (the GL pass that follows forces the GPU to
+// finish them first). With NO fire the direct fills are free — they overlap with the
+// rest of the frame — and the buffer would only add a render-target switch, so a calm
+// forest keeps the direct path. Both give the same image to within ~1% darkness.
+const SKY_Q = 4;
+let skyBuf = null, skyBufCtx = null;
+function skyBuffer(w, h) {
+    const bw = Math.ceil(w / SKY_Q), bh = Math.ceil(h / SKY_Q);
+    if (!skyBuf) { skyBuf = document.createElement("canvas"); skyBufCtx = skyBuf.getContext("2d"); }
+    if (skyBuf.width !== bw || skyBuf.height !== bh) { skyBuf.width = bw; skyBuf.height = bh; }
+    skyBufCtx.setTransform(1, 0, 0, 1, 0, 0);
+    skyBufCtx.clearRect(0, 0, bw, bh);
+    skyBufCtx.globalAlpha = 1;
+    return skyBufCtx;
 }
 
 // The sky between the canopy and the fire, back to front: drifting cloud shadows (they
 // fall on the trees too), then mist, then the night / sunset light grade. Fire is drawn
 // AFTER this, so flames cut through fog and blaze bright against a dark night.
-let sunGlare = null;
+let sunGlare = null, moonGlare = null, raySprite = null, wispSprite = null;
+// One soft light shaft: bright down its axis, fading to nothing at the sides and away
+// from the sun. Baked once; drawn rotated, several at a time, from the sun's corner.
+function bakeRay() {
+    const cv = document.createElement("canvas");
+    cv.width = 128; cv.height = 512;
+    const c = cv.getContext("2d");
+    const g = c.createLinearGradient(0, 0, 128, 0);
+    g.addColorStop(0, "rgba(255,226,170,0)"); g.addColorStop(0.5, "rgba(255,226,170,1)"); g.addColorStop(1, "rgba(255,226,170,0)");
+    c.fillStyle = g; c.fillRect(0, 0, 128, 512);
+    c.globalCompositeOperation = "destination-in";
+    const f = c.createLinearGradient(0, 0, 0, 512);
+    f.addColorStop(0, "rgba(0,0,0,1)"); f.addColorStop(0.55, "rgba(0,0,0,0.45)"); f.addColorStop(1, "rgba(0,0,0,0)");
+    c.fillStyle = f; c.fillRect(0, 0, 128, 512);
+    return cv;
+}
 function drawSkyPasses(w, h) {
     const z = viewZoom, px = Math.max(1, dpiScale);
     const fog = atmo.fog, gold = atmo.gold, night = atmo.night;
@@ -504,30 +541,49 @@ function drawSkyPasses(w, h) {
     // Cloud shadows — world-anchored (they pan with the camera at 0.8×, a touch of
     // parallax for their height), always drifting with the wind. A faint dapple under a
     // clear sky, heavy dark masses as cover builds, nearly gone at night.
+    // (A GL fire pass follows if anything is queued for one: this frame's ash/blossoms,
+    // or last frame's glow / flames / smoke.)
+    const glFollows = glowGPU && (burningCount > 0 || fxInstCount > 0 || glowInstCount > 0 || smokeInstCount > 0);
     if (props.showClouds) {
         const a = (0.07 + 0.30 * atmo.cover) * (1 - 0.75 * night);
         if (a > 0.01) {
             const tex = skyTexture("cloud");
-            ctx.globalCompositeOperation = "multiply";
-            ctx.globalAlpha = a;
-            drawSkyLayer(tex, 4.6 * px * z, (dx - camX * 0.8) * z, (dy - camY * 0.8) * z, w, h);
-            ctx.globalAlpha = a * 0.55;                       // a finer, faster layer for structure
-            drawSkyLayer(tex, 2.3 * px * z, (dx * 1.7 + 211 - camX * 0.7) * z, (dy * 1.7 + 97 - camY * 0.7) * z, w, h);
+            const q = glFollows ? 1 / SKY_Q : 1, b = glFollows ? skyBuffer(w, h) : ctx;
+            const bw = glFollows ? skyBuf.width : w, bh = glFollows ? skyBuf.height : h;
+            if (!glFollows) ctx.globalCompositeOperation = "multiply";
+            b.globalAlpha = a;
+            drawSkyLayer(b, tex, 4.6 * px * z * q, (dx - camX * 0.8) * z * q, (dy - camY * 0.8) * z * q, bw, bh);
+            b.globalAlpha = a * 0.55;                         // a finer, faster layer for structure
+            drawSkyLayer(b, tex, 2.3 * px * z * q, (dx * 1.7 + 211 - camX * 0.7) * z * q, (dy * 1.7 + 97 - camY * 0.7) * z * q, bw, bh);
+            if (glFollows) {
+                ctx.globalCompositeOperation = "multiply";
+                ctx.globalAlpha = 1;
+                ctx.imageSmoothingEnabled = true;
+                ctx.drawImage(skyBuf, 0, 0, bw, bh, 0, 0, w, h);
+            }
         }
     }
 
     // Mist — broad drifting banks plus a thin wash that softens every contrast.
     if (fog > 0.01) {
         const tex = skyTexture("mist");
-        ctx.globalCompositeOperation = "source-over";
-        ctx.globalAlpha = 0.16 * fog;
-        ctx.fillStyle = "rgb(222,230,238)";
-        ctx.fillRect(0, 0, w, h);
-        ctx.globalAlpha = 0.60 * fog;
-        drawSkyLayer(tex, 5.4 * px * z, (dx * 0.6 - camX * 0.6) * z, (dy * 0.6 - camY * 0.6) * z, w, h);
+        const q = glFollows ? 1 / SKY_Q : 1, b = glFollows ? skyBuffer(w, h) : ctx;
+        const bw = glFollows ? skyBuf.width : w, bh = glFollows ? skyBuf.height : h;
+        if (!glFollows) ctx.globalCompositeOperation = "source-over";
+        b.globalAlpha = 0.16 * fog;
+        b.fillStyle = "rgb(222,230,238)";
+        b.fillRect(0, 0, bw, bh);
+        b.globalAlpha = 0.60 * fog;
+        drawSkyLayer(b, tex, 5.4 * px * z * q, (dx * 0.6 - camX * 0.6) * z * q, (dy * 0.6 - camY * 0.6) * z * q, bw, bh);
         if (qMul >= 0.7) {                                    // second bank, drifting the other way
-            ctx.globalAlpha = 0.40 * fog;
-            drawSkyLayer(tex, 3.3 * px * z, (-dx * 0.4 + 140 - camX * 0.5) * z, (dy * 0.5 + 60 - camY * 0.5) * z, w, h);
+            b.globalAlpha = 0.40 * fog;
+            drawSkyLayer(b, tex, 3.3 * px * z * q, (-dx * 0.4 + 140 - camX * 0.5) * z * q, (dy * 0.5 + 60 - camY * 0.5) * z * q, bw, bh);
+        }
+        if (glFollows) {
+            ctx.globalCompositeOperation = "source-over";
+            ctx.globalAlpha = 1;
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(skyBuf, 0, 0, bw, bh, 0, 0, w, h);
         }
     }
 
@@ -558,6 +614,54 @@ function drawSkyPasses(w, h) {
         ctx.globalAlpha = 0.42 * gold * (0.94 + 0.06 * Math.sin(renderTimeSec * 0.6));
         const R = Math.max(w, h) * 1.05;
         ctx.drawImage(sunGlare, -R * 0.55, -R * 0.45, R * 2, R * 2);
+
+        // God rays — shafts fanning from the sun across the forest, each breathing on its
+        // own slow rhythm. Mist catches them: they glow far brighter in fog.
+        if (!raySprite) raySprite = bakeRay();
+        const len = Math.max(w, h) * 1.7, ox = -w * 0.10, oy = -h * 0.12;
+        ctx.globalAlpha = 1;
+        for (let i = 0; i < 6; i++) {
+            const a = 0.22 + i * 0.17 + Math.sin(renderTimeSec * 0.05 + i) * 0.03;
+            const wid = (110 + ((i * 53) % 130)) * (w / 1920 + 0.4);
+            const breath = 0.55 + 0.45 * Math.sin(renderTimeSec * 0.31 + i * 1.7);
+            ctx.globalAlpha = Math.min(0.7, 0.26 * gold * breath * (1 + 1.9 * fog));
+            ctx.save();
+            ctx.translate(ox, oy); ctx.rotate(-a);
+            ctx.drawImage(raySprite, -wid / 2, 0, wid, len);
+            ctx.restore();
+        }
+    }
+
+    // Dusk / dawn — wherever sunset and night overlap (mid-transition either way), the
+    // sky holds a violet-pink glow that neither mood has on its own.
+    const dusk = Math.min(1, Math.min(gold, night) * 2.2);
+    if (dusk > 0.01) {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = 0.26 * dusk;
+        ctx.fillStyle = "rgb(168,78,150)";
+        ctx.fillRect(0, 0, w, h);
+    }
+
+    // Moon — a cool glare in the corner opposite the sun, and now and then a meteor.
+    if (night > 0.02) {
+        if (!moonGlare) moonGlare = makeRadialSprite([
+            [0, "rgba(196,214,255,1)"], [0.4, "rgba(110,140,232,0.30)"], [1, "rgba(80,110,220,0)"]], 128);
+        ctx.globalCompositeOperation = "screen";
+        ctx.globalAlpha = 0.22 * night;
+        const Rm = Math.max(w, h) * 0.80;                   // centred just off the top-right corner
+        ctx.drawImage(moonGlare, w * 0.98 - Rm, -h * 0.04 - Rm, Rm * 2, Rm * 2);
+        const s = shootingStar;
+        if (s) {
+            const f = s.age / s.life, fade = Math.sin(Math.PI * Math.min(1, f));
+            const x = s.x * w, y = s.y * h, tx = x - s.vx * w * 7, ty = y - s.vy * h * 7;
+            ctx.globalCompositeOperation = "lighter";
+            ctx.lineCap = "round";
+            const g = ctx.createLinearGradient(tx, ty, x, y);
+            g.addColorStop(0, "rgba(200,220,255,0)"); g.addColorStop(1, "rgba(255,255,255,1)");
+            ctx.strokeStyle = g; ctx.globalAlpha = 0.9 * fade * night;
+            ctx.lineWidth = Math.max(1.5, 2 * px);
+            ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(x, y); ctx.stroke();
+        }
     }
     ctx.restore();
 }
@@ -785,6 +889,14 @@ function emitSmoke(cx, cy, r, R, G, B, A) {
 // Upload one instance list and issue a SINGLE instanced draw into the GL canvas,
 // over the box [ox,oy,vw,vh] (world px for glow, screen px for fx/smoke). `additive`
 // picks the blend (ONE,ONE) vs premultiplied source-over (smoke). Returns the canvas.
+// Screen box (display px, top-left origin) that the last glDrawInstanced actually drew
+// into. Every pass used to clear and composite the WHOLE viewport — a 4K GL clear plus
+// a full-screen blend (~7 ms on a GTX 1050 Ti) even for a handful of mist puffs or a
+// small fire's smoke. Now each pass scissors to the bounds of its own instances.
+const glBox = { x: 0, y: 0, w: 0, h: 0 };
+function glBlit(src) {
+    if (glBox.w > 0 && glBox.h > 0) ctx.drawImage(src, glBox.x, glBox.y, glBox.w, glBox.h, glBox.x, glBox.y, glBox.w, glBox.h);
+}
 function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     const g = glGlow, gl = g.gl, L = g.locs, ext = g.ext;
     // Pre-sized at resize() to viewport+margin; clamp (never resize the drawing
@@ -794,9 +906,20 @@ function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     if (vh > g.canvas.height) vh = g.canvas.height;
     const H = g.canvas.height;
     gl.viewport(0, H - vh, vw, vh);            // render into the TOP-left vw×vh (display space)
-    gl.disable(gl.SCISSOR_TEST);
+    // Bounds of everything queued (a rotated blob never reaches past its longer radius).
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (let i = 0, o = 0; i < count; i++, o += GLOW_INST_FLOATS) {
+        const r = Math.max(inst[o + 2], inst[o + 3]);
+        if (inst[o] - r < x0) x0 = inst[o] - r;     if (inst[o] + r > x1) x1 = inst[o] + r;
+        if (inst[o + 1] - r < y0) y0 = inst[o + 1] - r; if (inst[o + 1] + r > y1) y1 = inst[o + 1] + r;
+    }
+    x0 = Math.max(0, Math.floor(x0 - ox) - 2); y0 = Math.max(0, Math.floor(y0 - oy) - 2);
+    x1 = Math.min(vw, Math.ceil(x1 - ox) + 2);  y1 = Math.min(vh, Math.ceil(y1 - oy) + 2);
+    if (count === 0 || x1 <= x0 || y1 <= y0) { glBox.w = glBox.h = 0; return g.canvas; }
+    glBox.x = x0; glBox.y = y0; glBox.w = x1 - x0; glBox.h = y1 - y0;
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(x0, H - y1, x1 - x0, y1 - y0);   // GL's origin is bottom-left
     gl.clear(gl.COLOR_BUFFER_BIT);
-    if (count === 0) return g.canvas;
 
     gl.useProgram(g.prog);
     glResetAttribs(gl);
@@ -826,6 +949,7 @@ function glDrawInstanced(inst, count, ox, oy, vw, vh, additive) {
     bind(L.aAlpha, 1, 28);
     bind(L.aAngle, 1, 32);
     ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, count);
+    gl.disable(gl.SCISSOR_TEST);
     return g.canvas;
 }
 
@@ -1028,7 +1152,7 @@ function renderTreesGPU(w, h, cell, vw, vh) {
     if (blossom > 0 && fxInstCount > 0) {
         const bc = glDrawInstanced(fxInst, fxInstCount, 0, 0, w, h, false);
         ctx.globalCompositeOperation = "source-over";
-        ctx.drawImage(bc, 0, 0, w, h, 0, 0, w, h);
+        glBlit(bc);
     }
     ctx.restore();   // back to the world transform
 }
@@ -3170,15 +3294,15 @@ function resize() {
         initGlowGL();   // try to put the fire glow on the GPU (falls back to 2D)
         initTreeGL();   // …and the trees (shares the same GL context)
     }
-    // Pre-size the GL glow buffer to the viewport (+margin) ONCE here. The fire
-    // bbox is always within the visible window, so this covers it without ever
-    // resizing the WebGL drawing buffer mid-run — a realloc would cause a hitch.
-    if (glGlow) {
-        const gW = w + 400, gH = h + 400;
-        if (glGlow.canvas.width < gW || glGlow.canvas.height < gH) {
-            glGlow.canvas.width  = Math.max(glGlow.canvas.width, gW);
-            glGlow.canvas.height = Math.max(glGlow.canvas.height, gH);
-        }
+    // Size the GL buffer to EXACTLY the viewport, once, here (never mid-run — a realloc
+    // would hitch). Every GL pass is screen-space now, so the old +400px safety margin
+    // was dead weight — and the cost of compositing a GL canvas scales with its pixel
+    // count: at 4K, dropping the margin took the trees pass alone from 3.9 → 2.6 ms
+    // on a GTX 1050 Ti. (Only reassigned on a real size change: assigning .width
+    // reallocates the buffer even when the value is the same.)
+    if (glGlow && (glGlow.canvas.width !== w || glGlow.canvas.height !== h)) {
+        glGlow.canvas.width = w;
+        glGlow.canvas.height = h;
     }
 
     rebuildGrid();          // sizes the (larger) world grid + worldPxW/H
@@ -3488,6 +3612,16 @@ function easeTo(a, t, rate, dt) {
     return a + (t - a) * (1 - Math.pow(1 - Math.min(0.5, rate), dt));
 }
 
+// A mood level eases through TWO cascaded low-pass stages instead of one. A single
+// exponential ease lurches at the start (full speed on the first tick) and only then
+// settles; two in series give an S-curve — a mood begins gently, swells, then settles —
+// which reads as a slow dawn rather than a fade being switched on.
+function easeMood(key, target, rate, dt) {
+    const raw = "_" + key;
+    atmo[raw] = easeTo(atmo[raw], target, rate * 2, dt);
+    atmo[key] = easeTo(atmo[key], atmo[raw], rate * 2, dt);
+}
+
 // The weather-aware wind. Cheap, so it's refreshed wherever it's read from outside the
 // sim tick (render, the loop) — a slider change shows up on the very next frame.
 function refreshWind() {
@@ -3506,6 +3640,11 @@ function pickMood() {
         (st <= WEATHER_CLEAR ? 0.45 : st === WEATHER_CLOUDY ? 0.20 : 0.06) + (atmo.recentRain > 0.4 ? 0.7 : 0),
         props.autoNight ? 0.7 : 0,                                  // night
     ];
+    // Moods flow like a day rather than shuffling: sunrise comes through mist, dusk
+    // follows sunset, and a night ends in dawn fog.
+    if (moodTarget === MOOD_FOG)    w[MOOD_SUNSET] *= 1.8;
+    if (moodTarget === MOOD_SUNSET) w[MOOD_NIGHT]  *= 3.0;
+    if (moodTarget === MOOD_NIGHT)  w[MOOD_FOG]    *= 3.0;
     let sum = 0; for (let i = 0; i < w.length; i++) sum += w[i];
     let r = Math.random() * sum, pick = MOOD_NONE;
     for (let i = 0; i < w.length; i++) { r -= w[i]; if (r <= 0) { pick = i; break; } }
@@ -3535,10 +3674,10 @@ function updateAtmosphere(dt, forced) {
     const tGale  = want === MOOD_WINDY  ? 1 : 0;
     const tGold  = want === MOOD_SUNSET ? 1 - 0.5 * m : 0;
     const tNight = want === MOOD_NIGHT  ? 1 : 0;
-    atmo.fog   = easeTo(atmo.fog,   tFog,   0.0022 * sp, dt);
-    atmo.gale  = easeTo(atmo.gale,  tGale,  0.0030 * sp, dt);
-    atmo.gold  = easeTo(atmo.gold,  tGold,  0.0018 * sp, dt);
-    atmo.night = easeTo(atmo.night, tNight, 0.0014 * sp, dt);   // the slowest: dusk takes a while
+    easeMood("fog",   tFog,   0.0022 * sp, dt);
+    easeMood("gale",  tGale,  0.0030 * sp, dt);
+    easeMood("gold",  tGold,  0.0018 * sp, dt);
+    easeMood("night", tNight, 0.0014 * sp, dt);   // the slowest: dusk takes a while
     atmo.dry   = easeTo(atmo.dry,   weatherTarget === WEATHER_DROUGHT ? 1 : 0, 0.0040 * sp, dt);
 
     // Wind: the stage's wind, stilled by fog, whipped up by a windy mood, calmer at night.
@@ -3570,13 +3709,60 @@ function updateAtmosphere(dt, forced) {
     atmo.driftY += Math.sin(windAngle) * dr;
 
     updateRipples(dt);
+    updateWisps(dt);
+    updateShootingStar(dt);
+}
+
+// Mist rising off the ponds in fog: big pale puffs that swell in, drift on the wind and
+// thin out. Spawned over visible water; each lives ~15–30 s.
+function updateWisps(dt) {
+    const fog = atmo.fog;
+    if (fog > 0.08 && qMul >= 0.5) {
+        const cap = (80 * qMul * fog) | 0;
+        const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
+        const vw = canvas.width / viewZoom, vh = canvas.height / viewZoom;
+        let want = 0.5 * fog * dt; want = (want | 0) + (Math.random() < want % 1 ? 1 : 0);
+        for (let tries = 0; want > 0 && tries < 8 && wisps.length < cap; tries++) {
+            const x = camX + Math.random() * vw, y = camY + Math.random() * vh;
+            const cx = (x / cell) | 0, cy = (y / cell) | 0;
+            if (cx < 0 || cx >= cols || cy < 0 || cy >= rows || grid[cy * cols + cx] !== WATER) continue;
+            wisps.push({ x, y, vx: (Math.random() - 0.5) * 0.05, vy: -0.02 - Math.random() * 0.05,
+                         size: cell * (1.6 + Math.random() * 2.2), age: 0, life: 450 + Math.random() * 450 });
+            want--;
+        }
+    }
+    const wx = Math.cos(windAngle) * windNow * 0.10, wy = Math.sin(windAngle) * windNow * 0.10;
+    let w = 0;
+    for (let i = 0; i < wisps.length; i++) {
+        const p = wisps[i];
+        rememberPos(p);
+        p.age += dt; p.x += (p.vx + wx) * dt; p.y += (p.vy + wy) * dt;
+        p.size += 0.006 * dt;
+        if (p.age < p.life) wisps[w++] = p;
+    }
+    wisps.length = w;
+}
+
+// A meteor, now and then, on a clear night. Positions are fractions of the screen.
+function updateShootingStar(dt) {
+    if (shootingStar) {
+        const s = shootingStar;
+        s.x += s.vx * dt; s.y += s.vy * dt; s.age += dt;
+        if (s.age > s.life) shootingStar = null;
+    } else if (atmo.night > 0.6 && weatherIntensitySmooth < 0.1 && Math.random() < dt / 1100) {
+        const ang = 0.35 + Math.random() * 0.5, sp = 0.020 + Math.random() * 0.008;   // screen-fractions per tick
+        const dir = Math.random() < 0.5 ? 1 : -1;
+        shootingStar = { x: dir > 0 ? 0.05 + Math.random() * 0.4 : 0.55 + Math.random() * 0.4, y: Math.random() * 0.35,
+                         vx: dir * Math.cos(ang) * sp, vy: Math.sin(ang) * sp, age: 0, life: 24 };
+    }
 }
 
 // Anything fading or pending that the sim must keep ticking even when nothing else is
 // moving — otherwise a mood would freeze half-faded the moment you switch to Clear.
 function atmoBusy() {
     return atmo.fog > 0.004 || atmo.gale > 0.004 || atmo.gold > 0.004 || atmo.night > 0.004 ||
-           atmo.rainbow > 0.004 || ripples.length > 0 || moodTarget !== MOOD_NONE;
+           atmo.rainbow > 0.004 || ripples.length > 0 || wisps.length > 0 || shootingStar !== null ||
+           moodTarget !== MOOD_NONE;
 }
 
 // Rain rings spreading on the ponds — the single most "alive" thing rain can do to
@@ -3996,11 +4182,17 @@ function spawnLeaf() {
     } else {
         color = LEAF_COLORS[(Math.random() * LEAF_COLORS.length) | 0];
     }
+    // In a gale, some of what the wind carries is pale dandelion-seed fluff, not leaves:
+    // smaller, whiter, and it travels faster.
+    let size = 1.2 + Math.random() * 1.6, speed = 1;
+    if (atmo.gale > 0.25 && Math.random() < 0.40 * atmo.gale) {
+        color = [250, 248, 236]; size = 0.8 + Math.random() * 0.9; speed = 1.5;
+    }
     leaves.push({
         x, y,
-        vx: wxF * (0.7 + Math.random() * 1.0),
-        vy: wyF * (0.7 + Math.random() * 1.0),
-        size: 1.2 + Math.random() * 1.6,
+        vx: wxF * (0.7 + Math.random() * 1.0) * speed,
+        vy: wyF * (0.7 + Math.random() * 1.0) * speed,
+        size,
         rot: Math.random() * Math.PI * 2,
         rotSpd: (Math.random() - 0.5) * 0.12,
         life: 1.0,
@@ -4575,6 +4767,10 @@ function update(dt = SIM_DT) {
             const leafDamp = damp(0.985, dt);
             p.vx = p.vx * leafDamp + (wxL + (Math.random() - 0.5) * 0.12) * dt;
             p.vy = p.vy * leafDamp + (wyL + (Math.random() - 0.5) * 0.12) * dt;
+            if (atmo.gale > 0.02) {          // a gale eddies: leaves and seeds swirl instead of flying straight
+                p.vx += Math.cos(simClock * 0.035 + p.rot * 2) * 0.05 * atmo.gale * dt;
+                p.vy += Math.sin(simClock * 0.040 + p.rot * 3) * 0.05 * atmo.gale * dt;
+            }
             p.rot += p.rotSpd * dt;
             p.life -= 0.0022 * dt;
             if (p.life > 0 && p.x > minX && p.x < maxX && p.y > minY && p.y < maxY) {
@@ -5296,7 +5492,11 @@ function renderScene() {
         const wy0 = Math.max(0, (camY / cell) | 0);
         const wcw = Math.min(cols - wx0, Math.ceil(vw / cell) + 1);
         const wch = Math.min(rows - wy0, Math.ceil(vh / cell) + 1);
-        const sparkN = (14 + 22 * perfQuality) | 0;   // 36 at full quality → 14 under load
+        // Glints take the colour of the light — warm gold at sunset, cool silver by moon —
+        // and there are more of them: low light on water is the whole show.
+        const sparkN = ((14 + 22 * perfQuality) * (1 + 0.9 * atmo.gold + 0.7 * atmo.night)) | 0;
+        const gR = (240 + 15 * atmo.gold - 50 * atmo.night) | 0, gG = (250 - 28 * atmo.gold - 25 * atmo.night) | 0,
+              gB = (255 - 85 * atmo.gold) | 0;
         // Positions come from a ~22 Hz TIME bucket, not per-frame Math.random, so the
         // shimmer looks identical at 60 / 144 / 240 Hz (instead of twinkling faster the
         // higher the refresh) and reads as a gentle shimmer, not per-frame noise.
@@ -5313,7 +5513,7 @@ function renderScene() {
             const phase = (sx * 0.018 + sy * 0.013 + bandPhase);
             const b = Math.sin(phase) * 0.5 + 0.5; // 0..1
             const alpha = (0.30 + b * 0.55).toFixed(2);
-            ctx.fillStyle = `rgba(240,250,255,${alpha})`;
+            ctx.fillStyle = `rgba(${gR},${gG},${gB},${alpha})`;
             ctx.fillRect(sx, sy, 1, 1);
         }
     }
@@ -5434,7 +5634,7 @@ function renderScene() {
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.globalCompositeOperation = "lighter";
             ctx.globalAlpha = 1;
-            ctx.drawImage(sc, 0, 0, w, h, 0, 0, w, h);
+            glBlit(sc);
             ctx.restore();
         }
     } else {
@@ -5955,17 +6155,14 @@ function renderScene() {
             const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
             const k = (((props.fireGlow > 0 && qGlowBlur) ? Math.min(1, 0.6 * props.fireGlow * audioBoost) : 0) + 0.4) * (1 + 0.5 * atmo.fog + 0.35 * atmo.night);   // fire scatters in mist, and stands out at night
             const glc = glDrawInstanced(glowInst, glowInstCount, 0, 0, w, h, true);
-            const sx0 = Math.max(0, ((gx0 - camX) * z) | 0), sy0 = Math.max(0, ((gy0 - camY) * z) | 0);
-            const sx1 = Math.min(w, Math.ceil((gx1 - camX) * z)), sy1 = Math.min(h, Math.ceil((gy1 - camY) * z));
-            const sw = sx1 - sx0, sh = sy1 - sy0;
-            if (sw > 0 && sh > 0) {
+            if (glBox.w > 0 && glBox.h > 0) {
                 ctx.save();
                 ctx.setTransform(1, 0, 0, 1, 0, 0);
                 ctx.imageSmoothingEnabled = true;
                 ctx.globalCompositeOperation = "lighter";
                 ctx.globalAlpha = Math.min(1, k);
-                ctx.drawImage(glc, sx0, sy0, sw, sh, sx0, sy0, sw, sh);
-                if (k > 1) { ctx.globalAlpha = k - 1; ctx.drawImage(glc, sx0, sy0, sw, sh, sx0, sy0, sw, sh); }
+                glBlit(glc);
+                if (k > 1) { ctx.globalAlpha = k - 1; glBlit(glc); }
                 ctx.restore();
             }
         }
@@ -6129,7 +6326,7 @@ function renderScene() {
         ctx.globalCompositeOperation = "lighter";
         ctx.globalAlpha = 1;
         ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(fxc, 0, 0, w, h, 0, 0, w, h);
+        glBlit(fxc);
         ctx.restore();   // back to the world transform
     }
 
@@ -6180,6 +6377,20 @@ function renderScene() {
 
     // Smoke (above fire, below leaves) — sooty/dark at the base, lightening as it
     // rises, with a billowing second lobe on the larger puffs.
+    // Fog's mist rising off the water — soft sprites on the 2D canvas. (Through the GPU
+    // smoke pass each frame with mist cost ~4 ms at 4K: a GL composite carries a fixed
+    // per-pass overhead, and a few dozen puffs on a 2D canvas are essentially free.)
+    if (wisps.length) {
+        if (!wispSprite) wispSprite = makeRadialSprite([
+            [0, "rgba(228,235,242,1)"], [0.30, "rgba(228,235,242,0.62)"], [0.65, "rgba(228,235,242,0.20)"], [1, "rgba(228,235,242,0)"]], 64);
+        const fogK = 0.085 * (0.4 + 0.6 * atmo.fog);
+        for (const p of wisps) {
+            ctx.globalAlpha = Math.sin(Math.PI * Math.min(1, p.age / p.life)) * fogK;
+            ctx.drawImage(wispSprite, drawX(p) - p.size, drawY(p) - p.size, p.size * 2, p.size * 2);
+        }
+        ctx.globalAlpha = 1;
+    }
+
     if (glowGPU) smokeInstCount = 0;
     if (props.showSmoke && smokeParticles.length) {
         if (!glowGPU) { ctx.save(); emit2DCtx = ctx; }
@@ -6207,7 +6418,7 @@ function renderScene() {
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.imageSmoothingEnabled = true;
             ctx.globalAlpha = 1;      // per-puff opacity is already baked into each instance
-            ctx.drawImage(smc, 0, 0, w, h, 0, 0, w, h);
+            glBlit(smc);
             ctx.restore();
         }
     }
