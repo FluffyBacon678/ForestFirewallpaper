@@ -227,6 +227,16 @@ Features:
 - **"Screen effects" toggle** — the full-screen weather tint, lightning flash and RGB
   edge glow are gentler by default and can be switched off entirely for a calm,
   easy-on-the-eyes desktop background
+- **Day / night cycle** — a sun and moon travel the sky; sunrise/sunset gold and a
+  violet dusk glow blend with the weather moods. In Wallpaper Engine choose **Cycle**
+  (set the minutes per day), **Real clock** (follows your PC), **Fixed** (hold a time)
+  or **Off**; the *Time of day* slider sets the time instantly (the sky glides there) and
+  *Night darkness* sets how deep night gets
+- **Better bare ground** — dirt is painted as blended soil patches (loam, clay, sand,
+  damp near water) with pebbles, cracks, leaf litter and roots; paths get their own detail
+- **Grass regrows in visible stages** — bare soil → sparse sprouts → tufts → full grass
+- **Fire glow merged into the flame pass** — the whole fire is one instanced draw and
+  one composite instead of two, trimming a GL→2D handoff every frame
 - **Audio reactivity** — fire glow + wind respond to system audio
   via `window.wallpaperRegisterAudioListener`
 - **Mouse hover indicator** — dashed circle shows ignition radius before you click

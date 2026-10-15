@@ -79,6 +79,10 @@ const props = {
     weatherChangeSpeed: 1.0,
     showClouds:        true,  // drifting cloud shadows (cheap: a scrolling noise texture)
     autoNight:         false, // let the auto-cycle include NIGHT (a big change, so opt-in)
+    dayCycle:          "cycle", // off | cycle | clock | fixed — a sun and moon that travel the sky
+    dayLength:         30,      // minutes for one full day (cycle mode)
+    timeOfDay:         10,      // hours 0-24: the start time (cycle) or the fixed time
+    nightDarkness:     0.8,     // how dark the night gets
     rainIntensity:     1.0,
     rainScatter:       0.65,
     rainExtinguishes:  true,
@@ -290,12 +294,16 @@ let moodTimer  = 1500;              // base ticks until the auto-cycle picks the
 const atmo = {
     fog: 0, gale: 0, gold: 0, night: 0,   // mood levels (0..1)
     _fog: 0, _gale: 0, _gold: 0, _night: 0,   // their lagged targets (see easeMood)
+    mgold: 0, mnight: 0, _mgold: 0, _mnight: 0,   // sunset / night as set by the WEATHER mood
+    cgold: 0, cnight: 0,                          // sunset / night as set by the DAY CYCLE
+                                                  // (gold / night above = the stronger of the two)
     dry: 0,                               // drought haze
     cover: 0.1,                           // cloud cover → how strong the cloud shadows are
     fireMul: 1, windMul: 1,               // smoothed fire-spread and wind multipliers
     recentRain: 0, rainbow: 0,            // a rainbow follows a storm that has just cleared
     driftX: 0, driftY: 0,                 // cumulative cloud/fog drift (world px)
 };
+let dayPos = 0.42;                  // time of day 0..1: 0 midnight, .25 sunrise, .5 noon, .75 sunset
 let windNow = 0.5;                  // the wind actually blowing = slider × weather
 let ripples = [];                   // rain rings spreading on the ponds
 let wisps = [];                     // mist rising off the water in fog
@@ -401,7 +409,7 @@ let cols = 0, rows = 0;
 let grid, burnTimer, treeVar, grassVar, waterPhase;
 // Fire lifecycle: burnMax = each cell's total burn duration (to compute age);
 // fireHeat = 0..1 local heat from burning neighbours (the "blaze" clustering effect)
-let burnMax, fireHeat, fireType;
+let burnMax, fireHeat, fireType, grassGrow;
 // Tree growth stage 0..1 (sapling → mature). Regrown trees start small and grow.
 let treeGrowth;
 let smokeParticles = [];
@@ -608,7 +616,7 @@ function drawSkyPasses(w, h) {
     // clear sky, heavy dark masses as cover builds, nearly gone at night.
     // (A GL fire pass follows if anything is queued for one: this frame's ash/blossoms,
     // or last frame's glow / flames / smoke.)
-    const glFollows = glowGPU && (burningCount > 0 || fxInstCount > 0 || glowInstCount > 0 || smokeInstCount > 0);
+    const glFollows = glowGPU && (burningCount > 0 || fxInstCount > 0 || smokeInstCount > 0);
     if (props.showClouds) {
         const a = (0.07 + 0.30 * atmo.cover) * (1 - 0.75 * night);
         if (a > 0.01) {
@@ -655,7 +663,7 @@ function drawSkyPasses(w, h) {
     // Night — a deep moonlit blue over everything below the fire.
     if (night > 0.01) {
         ctx.globalCompositeOperation = "multiply";
-        ctx.globalAlpha = 0.80 * night;
+        ctx.globalAlpha = props.nightDarkness * night;
         ctx.fillStyle = "rgb(38,54,108)";
         ctx.fillRect(0, 0, w, h);
     }
@@ -677,16 +685,17 @@ function drawSkyPasses(w, h) {
             [0, "rgba(255,214,140,1)"], [0.35, "rgba(255,160,80,0.38)"], [1, "rgba(255,120,40,0)"]], 128);
         ctx.globalCompositeOperation = "screen";
         ctx.globalAlpha = 0.42 * gold * (0.94 + 0.06 * Math.sin(renderTimeSec * 0.6));
-        const R = Math.max(w, h) * 1.05;
-        ctx.drawImage(sunGlare, -R * 0.55, -R * 0.45, R * 2, R * 2);
+        const R = Math.max(w, h) * 0.95, bod = skyBodies(), sunX = bod.sx * w, sunY = bod.sy * h;
+        ctx.drawImage(sunGlare, sunX - R, sunY - R, R * 2, R * 2);
 
         // God rays — shafts fanning from the sun across the forest, each breathing on its
         // own slow rhythm. Mist catches them: they glow far brighter in fog.
         if (!raySprite) raySprite = bakeRay();
-        const len = Math.max(w, h) * 1.7, ox = -w * 0.10, oy = -h * 0.12;
+        const len = Math.max(w, h) * 1.7, ox = sunX, oy = sunY;
+        const dirAng = Math.atan2(w * 0.5 - sunX, h * 0.6 - sunY);      // the fan points from the sun across the view
         ctx.globalAlpha = 1;
         for (let i = 0; i < 6; i++) {
-            const a = 0.22 + i * 0.17 + Math.sin(renderTimeSec * 0.05 + i) * 0.03;
+            const a = dirAng + (i - 2.5) * 0.17 + Math.sin(renderTimeSec * 0.05 + i) * 0.03;
             const wid = (110 + ((i * 53) % 130)) * (w / 1920 + 0.4);
             const breath = 0.55 + 0.45 * Math.sin(renderTimeSec * 0.31 + i * 1.7);
             ctx.globalAlpha = Math.min(0.7, 0.26 * gold * breath * (1 + 1.9 * fog));
@@ -713,8 +722,8 @@ function drawSkyPasses(w, h) {
             [0, "rgba(196,214,255,1)"], [0.4, "rgba(110,140,232,0.30)"], [1, "rgba(80,110,220,0)"]], 128);
         ctx.globalCompositeOperation = "screen";
         ctx.globalAlpha = 0.22 * night;
-        const Rm = Math.max(w, h) * 0.80;                   // centred just off the top-right corner
-        ctx.drawImage(moonGlare, w * 0.98 - Rm, -h * 0.04 - Rm, Rm * 2, Rm * 2);
+        const Rm = Math.max(w, h) * 0.80, mb = skyBodies();
+        ctx.drawImage(moonGlare, w * mb.mx - Rm, h * mb.my - Rm, Rm * 2, Rm * 2);
         const s = shootingStar;
         if (s) {
             const f = s.age / s.life, fade = Math.sin(Math.PI * Math.min(1, f));
@@ -761,7 +770,6 @@ let glGlow = null;            // { canvas, gl, prog, locs, quadBuf, instBuf, ext
 const GLOW_INST_FLOATS = 9;   // center.xy, radius.xy, color.rgb, alpha, angle
 // Three instance lists, all drawn through the same instanced program, all in SCREEN
 // px (so they bound naturally to the viewport at any zoom):
-//  • glowInst  — the fire glow (additive; composited over the fire's screen bbox).
 //  • fxInst    — flame plumes / sparks / embers (additive, one draw).
 //                (Also borrowed briefly, and composited at once, by the ground-level
 //                 ash smoulder pass and the tree pass's spring blossom dabs.)
@@ -771,7 +779,6 @@ const GLOW_INST_FLOATS = 9;   // center.xy, radius.xy, color.rgb, alpha, angle
 // quality's dimmer glow) scales the glow buffer AFTER it saturates, which only a
 // separate composite can express. (At the default strength of 1.0 a merged buffer
 // would look identical — additive blends saturate the same either way.)
-let glowInst = new Float32Array(8192 * GLOW_INST_FLOATS); let glowInstCount = 0;
 let fxInst = new Float32Array(8192 * GLOW_INST_FLOATS);   let fxInstCount = 0;
 let smokeInst = new Float32Array(2048 * GLOW_INST_FLOATS); let smokeInstCount = 0;
 let emit2DCtx = null;         // which 2D ctx the *fallback* emitters draw into
@@ -880,17 +887,24 @@ function initGlowGL() {
 // GL buffer when zoomed out and clipped the glow on the far side of the screen. The
 // 2D path draws it immediately (bit-for-bit the original, so the fallback is proven).
 let glowVisBurning = 0;       // burning cells on screen last frame (glow LOD input)
+// GPU: the glow goes into the SAME additive list as the flame tongues, sparks and embers
+// (fxInst), so the whole fire is one instanced draw and one composite. Every GL->2D
+// handoff carries a fixed cost on top of the pixels (measured ~1-4 ms at 4K on a GTX
+// 1050 Ti), so two passes for one additive fire was pure waste. The glow's strength
+// (Fire-glow slider, audio, fog / night boost) used to be a composite alpha; it is now
+// folded into each instance's alpha (glowK).
+let glowK = 1;
 function emitGlow(cx, cy, rx, ry, R, G, B, A) {
     if (glowGPU) {
-        if ((glowInstCount + 1) * GLOW_INST_FLOATS > glowInst.length) {
-            const n = new Float32Array(glowInst.length * 2); n.set(glowInst); glowInst = n;
+        if ((fxInstCount + 1) * GLOW_INST_FLOATS > fxInst.length) {
+            const n = new Float32Array(fxInst.length * 2); n.set(fxInst); fxInst = n;
         }
         const z = viewZoom;
-        let o = glowInstCount * GLOW_INST_FLOATS;
-        glowInst[o] = (cx - camX) * z; glowInst[o + 1] = (cy - camY) * z; glowInst[o + 2] = rx * z; glowInst[o + 3] = ry * z;
-        glowInst[o + 4] = R / 255; glowInst[o + 5] = G / 255; glowInst[o + 6] = B / 255; glowInst[o + 7] = A;
-        glowInst[o + 8] = 0;
-        glowInstCount++;
+        let o = fxInstCount * GLOW_INST_FLOATS;
+        fxInst[o] = (cx - camX) * z; fxInst[o + 1] = (cy - camY) * z; fxInst[o + 2] = rx * z; fxInst[o + 3] = ry * z;
+        fxInst[o + 4] = R / 255; fxInst[o + 5] = G / 255; fxInst[o + 6] = B / 255; fxInst[o + 7] = A * glowK;
+        fxInst[o + 8] = 0;
+        fxInstCount++;
     } else {
         glowCtx.globalAlpha = A;
         glowCtx.fillStyle = rgbQ(R, G, B);
@@ -3177,6 +3191,7 @@ function rebuildGrid() {
     burnMax    = new Float32Array(n);
     fireHeat   = new Float32Array(n);
     fireType   = new Uint8Array(n);
+    grassGrow  = new Float32Array(n).fill(255);   // grass maturity 0..255 (255 = full-grown; regrowth starts at 0)
     treeGrowth = new Float32Array(n);
     treeVar    = new Uint8Array(n);
     grassVar   = new Uint8Array(n);
@@ -3710,6 +3725,7 @@ function pickMood() {
     ];
     // Moods flow like a day rather than shuffling: sunrise comes through mist, dusk
     // follows sunset, and a night ends in dawn fog.
+    if (props.dayCycle !== "off") { w[MOOD_SUNSET] = 0; w[MOOD_NIGHT] = 0; }   // the day cycle supplies those
     if (moodTarget === MOOD_FOG)    w[MOOD_SUNSET] *= 1.8;
     if (moodTarget === MOOD_SUNSET) w[MOOD_NIGHT]  *= 3.0;
     if (moodTarget === MOOD_NIGHT)  w[MOOD_FOG]    *= 3.0;
@@ -3744,8 +3760,11 @@ function updateAtmosphere(dt, forced) {
     const tNight = want === MOOD_NIGHT  ? 1 : 0;
     easeMood("fog",   tFog,   0.0022 * sp, dt);
     easeMood("gale",  tGale,  0.0030 * sp, dt);
-    easeMood("gold",  tGold,  0.0018 * sp, dt);
-    easeMood("night", tNight, 0.0014 * sp, dt);   // the slowest: dusk takes a while
+    easeMood("mgold",  tGold,  0.0018 * sp, dt);
+    easeMood("mnight", tNight, 0.0014 * sp, dt);   // the slowest: dusk takes a while
+    updateDayCycle(dt);
+    atmo.gold  = Math.max(atmo.mgold,  atmo.cgold);    // the weather's sunset and the day's sunset
+    atmo.night = Math.max(atmo.mnight, atmo.cnight);   // are the same light — whichever is stronger
     atmo.dry   = easeTo(atmo.dry,   weatherTarget === WEATHER_DROUGHT ? 1 : 0, 0.0040 * sp, dt);
 
     // Wind: the stage's wind, stilled by fog, whipped up by a windy mood, calmer at night.
@@ -3825,10 +3844,45 @@ function updateShootingStar(dt) {
     }
 }
 
+// ── Day / night ──────────────────────────────────────────
+// dayPos runs 0..1 over a day (0 midnight, .25 sunrise, .5 noon, .75 sunset). The sun's
+// height gives two levels: NIGHT (dark under the horizon) and GOLD (the warm light as
+// the sun nears it, at dawn and at dusk). Where both are present you get the violet
+// dusk / dawn glow. Modes: cycle (a day lasts `dayLength` minutes), clock (follow the
+// PC's own time), fixed (hold `timeOfDay`), off (weather moods only). The levels ease
+// toward the sun's height over ~1 s, so dragging the time slider glides the sky.
+function updateDayCycle(dt) {
+    const mode = props.dayCycle;
+    let tN = 0, tG = 0;
+    if (mode !== "off") {
+        if (mode === "cycle") dayPos = (dayPos + dt / (Math.max(0.5, props.dayLength) * 1800)) % 1;   // 1800 base ticks per minute
+        else if (mode === "clock") { const d = new Date(); dayPos = (d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600) / 24; }
+        else dayPos = (props.timeOfDay / 24) % 1;
+        const el = -Math.cos(6.2831853 * dayPos);              // sun height: -1 midnight … +1 noon
+        let n = (0.05 - el) / 0.45; n = n < 0 ? 0 : n > 1 ? 1 : n;
+        tN = n * n * (3 - 2 * n);
+        const g = (el - 0.02) / 0.26;
+        tG = Math.exp(-g * g);
+    }
+    atmo.cnight = easeTo(atmo.cnight, tN, 0.03, dt);
+    atmo.cgold  = easeTo(atmo.cgold,  tG, 0.03, dt);
+}
+// Where the sun and moon sit on the screen (fractions of its width / height), tracing an
+// arc over the day. With the cycle off they keep the fixed corners the moods always used.
+function skyBodies() {
+    const b = skyBodies.r || (skyBodies.r = { sx: -0.08, sy: -0.10, mx: 0.98, my: -0.04 });
+    if (props.dayCycle === "off") { b.sx = -0.08; b.sy = -0.10; b.mx = 0.98; b.my = -0.04; return b; }
+    const ps = Math.min(1, Math.max(0, (dayPos - 0.22) / 0.56));              // sun up: sunrise → sunset
+    b.sx = -0.10 + 1.20 * ps; b.sy = 0.15 - 0.40 * Math.sin(Math.PI * ps);
+    const pm = Math.min(1, ((dayPos - 0.72 + 1) % 1) / 0.56);                  // moon up: dusk → dawn
+    b.mx = 1.10 - 1.20 * pm; b.my = 0.15 - 0.40 * Math.sin(Math.PI * pm);
+    return b;
+}
+
 // Anything fading or pending that the sim must keep ticking even when nothing else is
 // moving — otherwise a mood would freeze half-faded the moment you switch to Clear.
 function atmoBusy() {
-    return atmo.fog > 0.004 || atmo.gale > 0.004 || atmo.gold > 0.004 || atmo.night > 0.004 ||
+    return props.dayCycle !== "off" || atmo.fog > 0.004 || atmo.gale > 0.004 || atmo.gold > 0.004 || atmo.night > 0.004 ||
            atmo.rainbow > 0.004 || ripples.length > 0 || wisps.length > 0 || shootingStar !== null ||
            moodTarget !== MOOD_NONE;
 }
@@ -4588,6 +4642,16 @@ function update(dt = SIM_DT) {
     const sdt = dt * 4;
     for (let i = regrowPhase; i < grid.length; i += 4) {
         const s = grid[i];
+        // …and thickens through four visible stages (sparse sprouts → short tufts → a
+        // fuller sward → nearly grown) before reaching its full sprite. Each cell grows at
+        // its own pace, so a regrowing scar fills in raggedly rather than all at once.
+        if (s === GRASS && grassGrow[i] < 255) {
+            const g0 = grassGrow[i];
+            let g1 = g0 + sdt * 0.12 * Math.max(0.5, props.regrowthRate) * (0.6 + 0.8 * ((((i * 2654435761) >>> 0)) / 4294967296));
+            if (g1 > 255) g1 = 255;
+            grassGrow[i] = g1;
+            if (g1 >= 255 || ((g1 | 0) >> 6) !== ((g0 | 0) >> 6)) terrainDrawGrass(i);
+        }
         if (s === ASH_GRASS || s === ASH_TREE) {
             burnTimer[i] -= sdt;
             // hot smouldering ash → cold charred earth (a lingering burn scar)
@@ -4659,12 +4723,14 @@ function update(dt = SIM_DT) {
             if (burnTimer[i] <= 0) {
                 grid[i] = GRASS;
                 grassVar[i] = pickRegrowthVariant();
+                grassGrow[i] = 0;               // starts as a few sprouts on bare soil…
                 terrainDrawGrass(i);
             }
         } else if (s === DIRT && regrowGrass > 0) {
             if (Math.random() < regrowGrass * sdt) {
                 grid[i] = GRASS;
                 grassVar[i] = pickGrassVariant();
+                grassGrow[i] = 0;
                 terrainDrawGrass(i); // incremental: stamp the new tuft onto terrain
             }
         } else if (s === GRASS && regrowTreeBase > 0) {
@@ -5022,9 +5088,36 @@ function terrainDrawGrass(i) {
     if (!terrainCanvas) { markTerrainDirty(); return; }
     const cell = Math.max(2, (props.cellSize * dpiScale) | 0);
     const y = (i / cols) | 0, x = i - y * cols;
-    terrainCtx.drawImage(grassSprites, grassVar[i] * grassSpW, 0, grassSpW, grassSpH,
-                         x * cell, y * cell, grassSpW, grassSpH);
+    // clear the cell first: a smaller young tuft must not sit on the last stage's bigger one
+    terrainCtx.drawImage(bgCanvas, x * cell, y * cell, cell, cell, x * cell, y * cell, cell, cell);
+    drawGrassCell(terrainCtx, i, x, y, cell);
     markStaticDirty(i);
+}
+// Stage → [tuft count, tuft scale]: growth is 3 tiny sprouts, then 2 short tufts, then
+// one fuller sward, then nearly grown — soil showing through until the last stage.
+const GRASS_STAGES = [
+    { n: 3, sc: 0.30, off: [[-0.26, 0.02], [0.24, -0.04], [0.0, 0.14]] },
+    { n: 2, sc: 0.46, off: [[-0.20, 0.04], [0.20, -0.02]] },
+    { n: 1, sc: 0.72, off: [[0, 0]] },
+    { n: 1, sc: 0.90, off: [[0, 0]] },
+];
+function drawGrassCell(c, i, x, y, cell) {
+    const g = grassGrow[i], sx0 = grassVar[i] * grassSpW;
+    if (g >= 255) {
+        c.drawImage(grassSprites, sx0, 0, grassSpW, grassSpH, x * cell, y * cell, grassSpW, grassSpH);
+        return;
+    }
+    const st = GRASS_STAGES[(g | 0) >> 6];
+    // bare soil showing through, fading as the grass fills in
+    c.globalAlpha = 0.9 * (1 - g / 255);
+    const blob = soilBlob(1);
+    c.drawImage(blob, x * cell - cell * 0.15, y * cell - cell * 0.15, cell * 1.3, cell * 1.3);
+    c.globalAlpha = 1;
+    const w = grassSpW * st.sc, h = grassSpH * st.sc;
+    for (let k = 0; k < st.n; k++) {
+        const ox = st.off[k][0] * cell, oy = st.off[k][1] * cell;
+        c.drawImage(grassSprites, sx0, 0, grassSpW, grassSpH, x * cell + (cell - w) / 2 + ox, y * cell + cell - h + oy, w, h);
+    }
 }
 function terrainRestoreDirt(i) {
     if (!terrainCanvas) { markTerrainDirty(); return; }
@@ -5039,6 +5132,118 @@ function terrainRestoreDirt(i) {
 // Bake the worldgen-static terrain (dirt + water + paths + lily pads + rocks).
 // None of this changes when cells burn/regrow, so it's baked once per world —
 // keeping the expensive blurred-water passes out of the per-frame static rebuild.
+// ── Bare ground ───────────────────────────────────────────
+// Soil used to be the mossy base texture with nothing on it. Each bare cell now gets
+// overlapping soft blobs of soil in a handful of tones — dark loam, loam, dry clay,
+// pale sand, damp earth near the water — picked by broad noise so the tone drifts across
+// a clearing, then scattered detail: pebbles with a shadow, cracks in dry clay, leaf
+// litter, dry blades, roots and a sheen on damp ground. All deterministic per cell.
+const SOIL_TONES = [[58, 42, 28], [84, 62, 40], [112, 84, 54], [138, 108, 72], [44, 34, 24]];
+const soilBlobs = [];
+function soilBlob(k) {
+    if (!soilBlobs[k]) {
+        const t = SOIL_TONES[k];
+        soilBlobs[k] = makeRadialSprite([
+            [0, `rgba(${t[0]},${t[1]},${t[2]},1)`], [0.55, `rgba(${t[0]},${t[1]},${t[2]},0.85)`], [1, `rgba(${t[0]},${t[1]},${t[2]},0)`]], 48);
+    }
+    return soilBlobs[k];
+}
+function paintBareGround(sc, cell) {
+    const LITTER = ["rgba(150,90,40,0.75)", "rgba(122,102,42,0.75)", "rgba(92,70,32,0.75)", "rgba(172,122,52,0.7)"];
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const i = y * cols + x;
+            if (grid[i] !== DIRT) continue;
+            const seed = (i * 2654435761) >>> 0, h = k => hash01(seed, k);
+            const px = x * cell, py = y * cell;
+            // damp near water, otherwise a tone from broad noise
+            let wet = false;
+            for (let dy = -2; dy <= 2 && !wet; dy++) for (let dx = -2; dx <= 2; dx++) {
+                const nx = x + dx, ny = y + dy;
+                if (nx >= 0 && ny >= 0 && nx < cols && ny < rows && grid[ny * cols + nx] === WATER) { wet = true; break; }
+            }
+            const nz = (valueNoise(x * 0.11, y * 0.11, terrainSeed + 7741) - 0.5) / 0.2;     // ≈ -1..1
+            const tone = wet ? 4 : nz < -0.45 ? 0 : nz < 0.05 ? 1 : nz < 0.55 ? 2 : 3;
+            // two overlapping blobs: the main tone, and a neighbouring tone off to one side
+            sc.globalAlpha = 0.95;
+            sc.drawImage(soilBlob(tone), px + cell * (0.5 + (h(1) - 0.5) * 0.5) - cell * (0.85 + 0.4 * h(3)),
+                         py + cell * (0.5 + (h(2) - 0.5) * 0.5) - cell * (0.85 + 0.4 * h(3)), cell * (1.7 + 0.8 * h(3)), cell * (1.7 + 0.8 * h(3)));
+            if (!wet) {
+                sc.globalAlpha = 0.55;
+                const t2 = Math.max(0, Math.min(3, tone + (h(4) < 0.5 ? -1 : 1)));
+                sc.drawImage(soilBlob(t2), px + cell * (0.2 + 0.6 * h(5)) - cell * 0.55, py + cell * (0.2 + 0.6 * h(6)) - cell * 0.55, cell * 1.1, cell * 1.1);
+            }
+            sc.globalAlpha = 1;
+            if (waterPhase[i] & 0x80) continue;            // a path: its details come after the trail is laid
+            // pebbles
+            if (h(7) < 0.38) {
+                const np = 1 + ((h(8) * 3) | 0);
+                for (let q = 0; q < np; q++) {
+                    const bx = px + h(10 + q) * cell, by = py + h(20 + q) * cell, r = Math.max(1, cell * (0.05 + 0.06 * h(30 + q)));
+                    sc.fillStyle = "rgba(0,0,0,0.34)"; sc.beginPath(); sc.arc(bx + 0.6, by + 0.8, r, 0, 6.2831853); sc.fill();
+                    sc.fillStyle = `rgb(${118 + ((h(40 + q) * 36) | 0)},${108 + ((h(40 + q) * 28) | 0)},${92 + ((h(40 + q) * 24) | 0)})`;
+                    sc.beginPath(); sc.arc(bx, by, r, 0, 6.2831853); sc.fill();
+                    sc.fillStyle = "rgba(255,244,220,0.35)"; sc.beginPath(); sc.arc(bx - r * 0.3, by - r * 0.3, r * 0.4, 0, 6.2831853); sc.fill();
+                }
+            }
+            // cracks, in the dry tones
+            if (tone >= 2 && h(50) < 0.45) {
+                sc.strokeStyle = "rgba(30,20,12,0.5)"; sc.lineWidth = 1; sc.beginPath();
+                let cx = px + h(51) * cell, cy = py + h(52) * cell;
+                sc.moveTo(cx, cy);
+                for (let sgi = 0; sgi < 3; sgi++) { cx += (h(53 + sgi) - 0.5) * cell * 0.6; cy += (h(60 + sgi) - 0.25) * cell * 0.45; sc.lineTo(cx, cy); }
+                const fx = px + h(70) * cell, fy = py + h(71) * cell; sc.moveTo(fx, fy); sc.lineTo(fx + (h(72) - 0.5) * cell * 0.5, fy + (h(73) - 0.5) * cell * 0.5);
+                sc.stroke();
+            }
+            // leaf litter
+            if (h(80) < 0.45) {
+                const nl2 = 2 + ((h(81) * 3) | 0);
+                for (let q = 0; q < nl2; q++) { sc.fillStyle = LITTER[(h(82 + q) * 4) | 0]; sc.fillRect(px + h(90 + q) * cell, py + h(100 + q) * cell, 1 + ((h(110 + q) * 2) | 0), 1); }
+            }
+            // dry blades poking up
+            if (h(120) < 0.20) {
+                sc.strokeStyle = "rgba(178,162,98,0.75)"; sc.lineWidth = 1; sc.beginPath();
+                const bx = px + (0.2 + 0.6 * h(121)) * cell, by = py + cell * (0.7 + 0.25 * h(122));
+                for (let q = 0; q < 3; q++) { const o = (q - 1) * 1.6; sc.moveTo(bx + o, by); sc.lineTo(bx + o + (h(123 + q) - 0.5) * 2, by - 3 - h(130 + q) * cell * 0.22); }
+                sc.stroke();
+            }
+            // a root crossing the cell
+            if (h(140) < 0.10) {
+                sc.strokeStyle = "rgba(48,32,20,0.6)"; sc.lineWidth = 1.2; sc.beginPath();
+                sc.moveTo(px, py + h(141) * cell); sc.quadraticCurveTo(px + cell * 0.5, py + h(142) * cell, px + cell, py + h(143) * cell); sc.stroke();
+            }
+            // a sheen on damp earth
+            if (wet && h(150) < 0.35) {
+                sc.fillStyle = "rgba(150,176,196,0.16)";
+                sc.beginPath(); sc.ellipse(px + cell * (0.3 + 0.4 * h(151)), py + cell * (0.3 + 0.4 * h(152)), cell * 0.22, cell * 0.10, 0, 0, 6.2831853); sc.fill();
+            }
+        }
+    }
+}
+// Trails get pebbles scattered through the worn earth, laid on top of the trail.
+function paintPathDetails(sc, cell) {
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const i = y * cols + x;
+            if (grid[i] !== DIRT || !(waterPhase[i] & 0x80)) continue;
+            const seed = (i * 2654435761) >>> 0, h = k => hash01(seed, k + 500), px = x * cell, py = y * cell;
+            if (h(1) < 0.55) {
+                const np = 1 + ((h(2) * 3) | 0);
+                for (let q = 0; q < np; q++) {
+                    const bx = px + h(10 + q) * cell, by = py + h(20 + q) * cell, r = Math.max(1, cell * (0.04 + 0.05 * h(30 + q)));
+                    sc.fillStyle = "rgba(0,0,0,0.28)"; sc.beginPath(); sc.arc(bx + 0.5, by + 0.7, r, 0, 6.2831853); sc.fill();
+                    sc.fillStyle = `rgb(${150 + ((h(40 + q) * 40) | 0)},${132 + ((h(40 + q) * 34) | 0)},${104 + ((h(40 + q) * 30) | 0)})`;
+                    sc.beginPath(); sc.arc(bx, by, r, 0, 6.2831853); sc.fill();
+                }
+            }
+            if (h(60) < 0.35) {                      // a few darker packed-earth specks
+                sc.fillStyle = "rgba(70,50,30,0.35)";
+                for (let q = 0; q < 3; q++) sc.fillRect(px + h(61 + q) * cell, py + h(70 + q) * cell, 1, 1);
+            }
+        }
+    }
+}
+
 function bakeTerrain() {
     if (!terrainCanvas) {
         terrainCanvas = document.createElement("canvas");
@@ -5055,6 +5260,7 @@ function bakeTerrain() {
 
     sc.clearRect(0, 0, w, h);
     sc.drawImage(bgCanvas, 0, 0);
+    paintBareGround(sc, cell);   // (before the water, so a shoreline covers any soil that bleeds under it)
 
     // ---- Water (baked) ----
     // Smooth shorelines: uniform colors per layer so overlapping discs MERGE
@@ -5190,6 +5396,8 @@ function bakeTerrain() {
         }
     }
 
+    paintPathDetails(sc, cell);
+
     // ---- Rocks (worldgen-static) ----
     for (let y = 0; y < rows; y++) {
         const rowBase = y * cols;
@@ -5214,8 +5422,7 @@ function bakeTerrain() {
             const i = rowBase + x;
             const s = grid[i];
             if (s !== GRASS && s !== TREE && s !== BURN_GRASS && s !== BURN_TREE) continue;
-            sc.drawImage(grassSprites, grassVar[i] * grassSpW, 0, grassSpW, grassSpH,
-                         x * cell, y * cell, grassSpW, grassSpH);
+            drawGrassCell(sc, i, x, y, cell);
         }
     }
 
@@ -6044,7 +6251,12 @@ function renderScene() {
     // --- Fire glow pass ---
     // Track the fire's pixel bounding box for the heat-shimmer pass.
     let fbX0 = 1e9, fbY0 = 1e9, fbX1 = -1e9, fbY1 = -1e9;
-    if (glowGPU) glowInstCount = 0;
+    if (glowGPU) {
+        fxInstCount = 0;       // the shared additive fire list: glow, then flames / sparks / embers
+        const audioBoost0 = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
+        glowK = (((props.fireGlow > 0 && qGlowBlur) ? Math.min(1, 0.6 * props.fireGlow * audioBoost0) : 0) + 0.4)
+              * (1 + 0.5 * atmo.fog + 0.35 * atmo.night);   // fire scatters in mist, and stands out at night
+    }
     if (burningCount === 0) glowVisBurning = 0;
     if (burningCount > 0) {
         // Only the visible region matters: off-screen glow is never composited,
@@ -6247,26 +6459,6 @@ function renderScene() {
         const gx1 = Math.min(worldPxW, (fbX1 + cell + gpad) | 0);
         const gy1 = Math.min(worldPxH, (fbY1 + cell + gpad) | 0);
         const gw = gx1 - gx0, gh = gy1 - gy0;
-        if (glowGPU && gw > 0 && gh > 0 && glowInstCount > 0) {
-            // GPU: ONE instanced draw of every glow blob on the soft radial sprite
-            // (its wide falloff is the bloom — no CPU blur pass), composited
-            // additively over the fire's SCREEN-space box. Strength = the old
-            // Fire-glow-scaled bloom pass + a constant base pass, summed into a
-            // single composite (1.0 at default settings).
-            const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
-            const k = (((props.fireGlow > 0 && qGlowBlur) ? Math.min(1, 0.6 * props.fireGlow * audioBoost) : 0) + 0.4) * (1 + 0.5 * atmo.fog + 0.35 * atmo.night);   // fire scatters in mist, and stands out at night
-            const glc = glDrawInstanced(glowInst, glowInstCount, 0, 0, w, h, true);
-            if (glBox.w > 0 && glBox.h > 0) {
-                ctx.save();
-                ctx.setTransform(1, 0, 0, 1, 0, 0);
-                ctx.imageSmoothingEnabled = true;
-                ctx.globalCompositeOperation = "lighter";
-                ctx.globalAlpha = Math.min(1, k);
-                glBlit(glc);
-                if (k > 1) { ctx.globalAlpha = k - 1; glBlit(glc); }
-                ctx.restore();
-            }
-        }
         if (!glowGPU && gw > 0 && gh > 0) {
             const audioBoost = props.audioReactive ? (1 + audioBass * 0.6 * props.audioIntensity) : 1;
             const glowAmt = props.fireGlow * audioBoost * (1 + 0.5 * atmo.fog + 0.35 * atmo.night);
@@ -6310,10 +6502,9 @@ function renderScene() {
     // by "kind" (standard / tall-wispy / wide-squat / curly) and the tip curls
     // sideways with wind, so the fire looks alive and varied. Colour ramps deep
     // red base → orange → yellow → white-hot tip (blue-white at the hottest cores).
-    // GPU: plumes+sparks+embers share one screen-space additive list (reset here,
-    // unconditionally — they outlive the last burning cell), composited once after
-    // the embers.
-    if (glowGPU) fxInstCount = 0;
+    // GPU: glow + plumes + sparks + embers share one screen-space additive list (reset at
+    // the glow pass, unconditionally — they outlive the last burning cell), composited
+    // once after the embers.
     if (flamePlumes.length) {
         // GPU: emit screen-space additive instances (composited in one pass after
         // embers). 2D: draw straight onto ctx in 'lighter' mode (the original path).
@@ -6450,8 +6641,8 @@ function renderScene() {
         if (!glowGPU) ctx.restore();
     }
 
-    // GPU: one additive instanced draw composites the flames — plume tongues, sparks
-    // and embers (all queued in screen-space fxInst above) — over the scene.
+    // GPU: one additive instanced draw composites the whole fire — glow, plume tongues,
+    // sparks and embers (all queued in screen-space fxInst above) — over the scene.
     if (glowGPU && fxInstCount > 0) {
         const fxc = glDrawInstanced(fxInst, fxInstCount, 0, 0, w, h, true);
         ctx.save();
@@ -6848,7 +7039,7 @@ function renderScene() {
             `burn=${burningCount}  smoke=${smokeParticles.length}  embers=${embers.length}  ` +
             `plumes=${flamePlumes.length}  rain=${rainDrops.length}\n` +
             `leaves=${leaves.length}  fireflies=${fireflies.length}  birds=${birds.length}  ` +
-            `mood=${MOOD_NAMES[moodTarget]} fog=${atmo.fog.toFixed(2)} gale=${atmo.gale.toFixed(2)} gold=${atmo.gold.toFixed(2)} night=${atmo.night.toFixed(2)}  bolts=${lightningBolts.length}\n` +
+            `time=${String((dayPos * 24) | 0).padStart(2, "0")}:${String(((dayPos * 1440) % 60) | 0).padStart(2, "0")} (${props.dayCycle})  mood=${MOOD_NAMES[moodTarget]} fog=${atmo.fog.toFixed(2)} gale=${atmo.gale.toFixed(2)} gold=${atmo.gold.toFixed(2)} night=${atmo.night.toFixed(2)}  bolts=${lightningBolts.length}\n` +
             `weather=${wMode}  windDeg=${((windAngle * 180 / Math.PI) % 360).toFixed(0)}  ` +
             `cell=${cell}  grid=${cols}x${rows}`;
         debugEl.style.whiteSpace = "pre";
@@ -7136,6 +7327,8 @@ function applyProperty(key, raw) {
         case "audioIntensity":
         case "magicFire":
         case "fireVariety":
+        case "dayLength":
+        case "nightDarkness":
         case "panX":
         case "panY":
         case "panSpeed":
@@ -7201,6 +7394,13 @@ function applyProperty(key, raw) {
             break;
         case "season":
             props.season = String(v);
+            break;
+        case "dayCycle":
+            props.dayCycle = String(v);
+            break;
+        case "timeOfDay":
+            props.timeOfDay = Math.max(0, Math.min(24, finiteOr(v, props.timeOfDay)));
+            dayPos = (props.timeOfDay / 24) % 1;     // the slider sets the time right now (the sky eases there)
             break;
         case "seasonLength":
         case "snowAmount":

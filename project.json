@@ -344,6 +344,45 @@
                 "type":   "bool",
                 "value":  false
             },
+            "dayCycle": {
+                "order": 44.6,
+                "text":   "Day / night",
+                "type":   "combo",
+                "value":  "cycle",
+                "options": [
+                    { "label": "Cycle (a sun and moon travel the sky; speed below)", "value": "cycle" },
+                    { "label": "Real clock (follow your PC's time of day)",           "value": "clock" },
+                    { "label": "Fixed time (hold the time set below)",                 "value": "fixed" },
+                    { "label": "Off (weather moods only)",                              "value": "off"   }
+                ]
+            },
+            "dayLength": {
+                "order": 44.7,
+                "text":   "Day length - minutes for one full day (cycle mode)",
+                "type":   "slider",
+                "value":  30,
+                "min":    1,
+                "max":    240,
+                "step":   1
+            },
+            "timeOfDay": {
+                "order": 44.8,
+                "text":   "Time of day - hours, 0-24 (start time in cycle mode; sets the time now)",
+                "type":   "slider",
+                "value":  10,
+                "min":    0,
+                "max":    24,
+                "step":   0.25
+            },
+            "nightDarkness": {
+                "order": 44.9,
+                "text":   "Night darkness",
+                "type":   "slider",
+                "value":  0.8,
+                "min":    0.2,
+                "max":    1.0,
+                "step":   0.05
+            },
             "rainIntensity": {
                 "order": 45,
                 "text":   "Rain intensity (when raining)",
