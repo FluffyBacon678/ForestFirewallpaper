@@ -80,6 +80,23 @@ Features:
 - **Blaze / conflagration heat** — cells with many burning neighbours flare larger
   and shift white-hot, so clustered fires read as a roaring blaze while lone flames
   stay a calmer orange; smoke, embers and flame plumes all scale with intensity + heat
+- **Six kinds of fire, not one orange** — every burning cell is given a **style** when it
+  ignites, picked from a slow noise field so styles come in organic patches (with a little
+  speckle where they meet): **classic** orange; **ember** (deep red, low and slow, breathing
+  like a coal bed, throws embers freely); **golden blaze** (tall, fast, white-hot at the
+  heart, spits sparks); **gas flame** (a blue-white body with an orange rim, narrow and
+  steady); **copper** (the green-teal of burning copper salts, licking sideways); and a rare
+  **violet**. Each has its own colour for the glow, flame tongues, embers and sparks (blue
+  fire even reflects blue on the water), its own tongue shapes and its own tempo, and all of
+  them cool to the same dull coals at the end. **Fire variety** sets how much of a fire is
+  non-classic (0 = all classic orange); Magic fire still overrides it for fantasy colours.
+- **Flames that don't move in lockstep** — every cell flickers at its **own** two
+  frequencies (it used to be one shared pair, so a fire beat at a single rhythm), every
+  flame tongue runs at its own speed, embers and sparks pulse at their own rates, and a
+  short-wavelength ripple travels across the fire so neighbours are always out of step.
+  Measured on a 30-cell cluster, the flicker's spectral lock-in drops about 4×.
+- **More flame shapes** — beyond the four below, **forked** flames (two prongs leaning apart)
+  and low **rolling** flames, each style favouring its own.
 - **Varied flickering flame tongues** — flames come in four shapes (standard,
   tall-wispy, wide-squat, curly licker) that **curl and lean with the wind**, with
   occasional taller flare-ups and a deep-red → orange → yellow → white-hot gradient
@@ -408,7 +425,7 @@ Organized into sections in the Wallpaper Engine picker:
 |---|---|
 | Performance | Quality preset (Auto/Low/Medium/High/Ultra — Auto matches your GPU), Max FPS, Scale detail with resolution (4K) |
 | Terrain | Tree density (lushness), Tree size, Grass density, Rock density, Zoom (smaller = more zoomed out / lusher), Rivers, Lily pads, Paths, Rocks, Elevation shading |
-| Fire | Spread rate, Tree burn duration, Grass burn duration, Fire glow, Flame plumes, Embers, Smoke |
+| Fire | Spread rate, Tree burn duration, Grass burn duration, Fire glow, Flame plumes, Embers, Smoke, Magic fire, Fire variety |
 | Wind | Wind strength, Wind rotation speed, Wind streaks, Drifting leaves |
 | Seasons | Season (auto/spring/summer/autumn/winter), Season length (auto-cycle), Winter snow intensity |
 | Weather | Mode (auto/drought/clear/cloudy/rain/monsoon/storm/fog/windy/sunset/night), Front direction (LTR/RTL/TTB/BTT/static), Transition speed, Drifting cloud shadows, Include night in auto-cycle, Rain intensity, Rain scatter, Rain extinguishes |

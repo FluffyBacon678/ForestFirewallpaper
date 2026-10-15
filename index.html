@@ -51,6 +51,7 @@ const props = {
     grassBurnDuration: 0.7,
     fireGlow:          1.0,
     magicFire:         0.0,    // 0 = normal fire; >0 = fraction of cells with magic-coloured flames
+    fireVariety:       0.65,   // 0 = every flame classic orange; 1 = lots of ember / golden / gas / copper / violet
     heatShimmer:       false,  // rising heat-haze distortion above big fires (off — subtle even when on)
     windStrength:      1.0,
     windRotation:      0.8,
@@ -174,6 +175,70 @@ const MAGIC_FIRE = [
     [70, 120, 255],   // blue
     [255, 90, 200],   // pink
 ];
+// ── Fire styles ────────────────────────────────────────────
+// Not every flame is the same orange. A burning cell is given a STYLE when it ignites,
+// picked from a slow noise field so styles come in organic patches (a stand of golden
+// blaze, a pocket of embery smoulder, a blue-cored gas-flame stretch) with a little
+// speckle across the patch borders. `fireVariety` sets how much of a fire is non-classic.
+//   bed / mid / core : [r, g, b, mix] - the colour each glow layer is pulled toward
+//   ramp             : base -> body -> tip colours of the flame tongues
+//   h / w / curl     : tongue height, width and sideways lick;  spd: flicker speed
+//   ember / spark    : how freely it throws embers and sparks
+const FT_CLASSIC = 0, FT_EMBER = 1, FT_GOLD = 2, FT_GAS = 3, FT_COPPER = 4;   // (5 = violet — the last entry, never named alone)
+const FIRE_TYPES = [
+    { h: 1.00, w: 1.00, spd: 1.00, curl: 1.00, ember: 1.0, spark: 1.0, bed: null, mid: null, core: null, ramp: null },
+    // ember: deep red, low and slow, breathing like a coal bed, throws embers freely
+    { h: 0.74, w: 1.12, spd: 0.62, curl: 0.70, ember: 1.8, spark: 0.5,
+      bed: [190, 44, 18, 0.55], mid: [238, 74, 16, 0.62], core: [255, 150, 62, 0.55],
+      ramp: [[150, 24, 10], [232, 70, 14], [255, 148, 50]] },
+    // golden blaze: tall, fast, white-hot at the heart, spits sparks
+    { h: 1.28, w: 0.88, spd: 1.35, curl: 1.10, ember: 1.1, spark: 1.7,
+      bed: [255, 172, 62, 0.38], mid: [255, 206, 92, 0.55], core: [255, 232, 168, 0.72],
+      ramp: [[255, 108, 14], [255, 196, 58], [255, 236, 170]] },
+    // gas flame: a blue-white body with an orange rim and warm tips — narrow and steady
+    { h: 0.88, w: 0.80, spd: 0.80, curl: 0.50, ember: 0.5, spark: 0.4,
+      bed: [255, 138, 56, 0.34], mid: [108, 156, 255, 0.66], core: [176, 212, 255, 0.85],
+      ramp: [[40, 78, 250], [104, 154, 255], [255, 196, 110]] },
+    // copper: the green-teal of burning copper salts, licking sideways
+    { h: 1.00, w: 1.00, spd: 1.05, curl: 1.45, ember: 0.9, spark: 0.8,
+      bed: [30, 170, 110, 0.55], mid: [70, 220, 140, 0.70], core: [150, 255, 190, 0.74],
+      ramp: [[14, 122, 80], [70, 218, 136], [150, 255, 192]] },
+    // violet: rare, swaying, pale-pink at the tip
+    { h: 1.12, w: 0.95, spd: 1.00, curl: 1.85, ember: 0.9, spark: 1.0,
+      bed: [110, 44, 196, 0.55], mid: [176, 92, 250, 0.68], core: [236, 172, 255, 0.74],
+      ramp: [[76, 24, 160], [172, 88, 246], [238, 180, 255]] },
+];
+const FIRE_PICK_W = [0.26, 0.26, 0.18, 0.15, 0.15];   // ember, golden, gas, copper, violet
+function pickFireType(i, isTree) {
+    const v = props.fireVariety;
+    if (!(v > 0.001)) return FT_CLASSIC;
+    const x = i % cols, y = (i / cols) | 0;
+    const pc = 1 - 0.78 * v;                            // share of plain classic fire
+    const hs = hash2(x, y, 9157);
+    let u;
+    if (hs < 0.14) u = hash2(x, y, 3319);               // speckle: this cell ignores its patch
+    else {
+        const n = valueNoise(x * 0.085, y * 0.085, terrainSeed + 5521 + ((simClock / 9000) | 0) * 131);
+        u = (n - 0.20) / 0.62; u = u < 0 ? 0 : u > 1 ? 1 : u;
+    }
+    if (u < pc) return FT_CLASSIC;
+    let w = (u - pc) / (1 - pc), t = 5;
+    for (let k = 0; k < 5; k++) { w -= FIRE_PICK_W[k]; if (w < 0) { t = k + 1; break; } }
+    if (isTree && t === FT_EMBER && hs > 0.5) t = FT_GOLD;        // trees burn hot and tall,
+    else if (!isTree && t === FT_GOLD && hs > 0.5) t = FT_EMBER;  // grass smoulders and creeps
+    return t;
+}
+// Pull (r,g,b) toward a style's [r,g,b,mix] target. `lv` scales the target's brightness
+// with the flame's intensity; `keep` (1 -> 0) fades the style out as the fire dies to coals.
+// Writes TINT (no allocation - this runs per burning cell, per frame).
+const TINT = [0, 0, 0];
+function tintFire(r, g, b, t, lv, keep) {
+    const k = t[3] * keep;
+    TINT[0] = r + (t[0] * lv - r) * k;
+    TINT[1] = g + (t[1] * lv - g) * k;
+    TINT[2] = b + (t[2] * lv - b) * k;
+}
+
 const MAX_RAIN          = 1200;
 const ROCK_NUM_VARIANTS = 4;
 
@@ -336,7 +401,7 @@ let cols = 0, rows = 0;
 let grid, burnTimer, treeVar, grassVar, waterPhase;
 // Fire lifecycle: burnMax = each cell's total burn duration (to compute age);
 // fireHeat = 0..1 local heat from burning neighbours (the "blaze" clustering effect)
-let burnMax, fireHeat;
+let burnMax, fireHeat, fireType;
 // Tree growth stage 0..1 (sapling → mature). Regrown trees start small and grow.
 let treeGrowth;
 let smokeParticles = [];
@@ -356,11 +421,11 @@ function spawnSmoke(x, y, vx, vy, life, size, grow, shade, swirl, swirlSpd) {
     p.swirl = swirl; p.swirlSpd = swirlSpd; // swirl === undefined → no billow turbulence/lobe
     smokeParticles.push(p);
 }
-function spawnEmber(x, y, vx, vy, life, size, phase) {
+function spawnEmber(x, y, vx, vy, life, size, phase, ft) {
     const p = emberPool.length ? emberPool.pop() : {};
     p.x = x; p.y = y; p.px = x; p.py = y;
     p.vx = vx; p.vy = vy;
-    p.life = life; p.size = size; p.phase = phase;
+    p.life = life; p.size = size; p.phase = phase; p.ft = ft | 0;
     embers.push(p);
 }
 let windStreaks = [];
@@ -3111,6 +3176,7 @@ function rebuildGrid() {
     burnTimer  = new Float32Array(n);
     burnMax    = new Float32Array(n);
     fireHeat   = new Float32Array(n);
+    fireType   = new Uint8Array(n);
     treeGrowth = new Float32Array(n);
     treeVar    = new Uint8Array(n);
     grassVar   = new Uint8Array(n);
@@ -3331,6 +3397,7 @@ function igniteCell(i) {
         burnTimer[i] = BURN_BASE * props.treeBurnDuration * (0.8 + Math.random() * 0.4);
         burnMax[i]   = burnTimer[i];   // remember full duration for the lifecycle curve
         fireHeat[i]  = 0;
+        fireType[i]  = pickFireType(i, true);
         burningCount++;
         return true;
     } else if (s === GRASS) {
@@ -3338,6 +3405,7 @@ function igniteCell(i) {
         burnTimer[i] = BURN_BASE * props.grassBurnDuration * (0.8 + Math.random() * 0.4);
         burnMax[i]   = burnTimer[i];
         fireHeat[i]  = 0;
+        fireType[i]  = pickFireType(i, false);
         burningCount++;
         return true;
     }
@@ -4418,13 +4486,14 @@ function update(dt = SIM_DT) {
             for (let e = 0; e < 3 && embers.length < (MAX_EMBERS * qMul); e++) {
                 spawnEmber(x * cell + cell * 0.5, y * cell + cell * 0.5,
                     (Math.random() - 0.5) * 1.4, -(1.0 + Math.random() * 1.6),
-                    0.9 + Math.random() * 0.5, 1.1 + Math.random() * 1.2, Math.random() * 6.28);
+                    0.9 + Math.random() * 0.5, 1.1 + Math.random() * 1.2, Math.random() * 6.28, fireType[i]);
             }
         }
 
-        // Embers — more thrown from a roaring, clustered blaze
+        // Embers — more thrown from a roaring, clustered blaze (embery fire throws the most)
+        const ftype = fireType[i], FT = FIRE_TYPES[ftype];
         if (showEmbers && embers.length < emberCap) {
-            const emberChance = (isTree ? 0.10 : 0.025) * output;
+            const emberChance = (isTree ? 0.10 : 0.025) * output * FT.ember;
             if (Math.random() < emberChance * dt) {
                 spawnEmber(
                     x * cell + cell * 0.5,
@@ -4433,7 +4502,7 @@ function update(dt = SIM_DT) {
                     wyF * (0.9 + Math.random() * 1.2) * windNow + (Math.random() - 0.5) * 1.2,
                     0.7 + Math.random() * 0.5,
                     1.0 + Math.random() * 1.3,
-                    Math.random() * 6.28);
+                    Math.random() * 6.28, ftype);
             }
         }
 
@@ -4448,9 +4517,18 @@ function update(dt = SIM_DT) {
             const plumeChance = (isTree ? 0.34 : 0.13) * output + lowLick;
             if (Math.random() < plumeChance * dt) {
                 const sizeBase = (isTree ? 2.2 : 1.2) * (0.25 + intensity * 1.05) * (1 + heat * 0.7);
-                // kind: 0 standard, 1 tall wispy, 2 wide squat, 3 curly licker.
-                // Occasional taller flare-up at peak intensity.
+                // kind: 0 standard, 1 tall wispy, 2 wide squat, 3 curly licker, 4 forked
+                // (two tongues leaning apart), 5 low rolling flame. Each style has its own
+                // favourites, so a golden blaze is all tall wisps and forks while embery fire
+                // is squat and rolling. Occasional taller flare-up at peak intensity.
                 let kind = (Math.random() * 4) | 0;
+                const kr = Math.random();
+                if (ftype === FT_GOLD)        kind = kr < 0.45 ? 1 : kr < 0.7 ? 4 : kind;
+                else if (ftype === FT_EMBER)  kind = kr < 0.5 ? 2 : kr < 0.8 ? 5 : kind;
+                else if (ftype === FT_GAS)    kind = kr < 0.8 ? 0 : 1;
+                else if (ftype >= FT_COPPER)  kind = kr < 0.55 ? 3 : kr < 0.75 ? 4 : kind;
+                else if (kr < 0.12)           kind = 4;                  // classic: the odd fork
+                else if (kr < 0.22)           kind = 5;                  // ... and the odd roller
                 const flare = (intensity > 0.85 && Math.random() < 0.12) ? 1 : 0;
                 // Magic fire: whole blocks of cells burn in one magic colour, so
                 // you get coherent patches of cyan / green / purple / blue / pink
@@ -4469,13 +4547,15 @@ function update(dt = SIM_DT) {
                     size: sizeBase + Math.random() * 1.2,
                     life: 0.6 + Math.random() * 0.4,
                     phase: Math.random() * 100,
+                    ps: (0.65 + Math.random() * 0.75) * FT.spd,   // its own flicker speed: no two tongues beat together
                     hot: heat,
+                    ft: ftype,
                     kind, flare, mtype,
                     curl: (Math.random() - 0.5) * 1.6,     // sideways lick
                 });
                 // Crackling sparks pop off vigorous, hot flames
                 if (showEmbers && sparks.length < sparkCap
-                    && Math.random() < (0.12 + heat * 0.3) * intensity * dt) {
+                    && Math.random() < (0.12 + heat * 0.3) * intensity * FT.spark * dt) {
                     const n = 1 + (Math.random() * 2 | 0);
                     for (let sN = 0; sN < n; sN++) {
                         sparks.push({
@@ -4485,6 +4565,7 @@ function update(dt = SIM_DT) {
                             vy: wyF * 0.6 * windNow - (0.8 + Math.random() * 1.8), // shoot up
                             life: 0.5 + Math.random() * 0.5,
                             size: 0.6 + Math.random() * 0.8,
+                            ft: ftype,
                         });
                     }
                 }
@@ -4825,7 +4906,7 @@ function update(dt = SIM_DT) {
             p.vy = p.vy * plumeDamp + wyA * dt;
             p.size *= damp(1.038, dt);
             p.life -= 0.043 * dt;
-            p.phase += dt;
+            p.phase += dt * (p.ps || 1);
             if (p.life > 0) flamePlumes[writeI++] = p;
         }
         flamePlumes.length = writeI;
@@ -6040,27 +6121,36 @@ function renderScene() {
                         if (wa <= 0.02) continue;
                         const wr = cell * (0.55 + 0.3 * shim);
                         // flattened (rx≠ry) = surface reflection on the water
+                        const wT = fireType[i] ? FIRE_TYPES[fireType[i]].mid : null;   // blue fire reflects blue
                         emitGlow(wx * cell + cell * 0.5, wy * cell + cell * 0.55,
-                                 wr, wr * 0.5, 255, 150 + (intensity * 55 | 0), 55, wa);
+                                 wr, wr * 0.5, wT ? wT[0] : 255, wT ? wT[1] : 150 + (intensity * 55 | 0), wT ? wT[2] : 55, wa);
                     }
                 }
 
                 // SMOOTH per-cell flicker + sway (each flame at its own phase) instead
                 // of per-frame random — the flame breathes and dances gracefully rather
                 // than boiling/strobing every frame. No high-frequency noise.
-                const fph = (((i * 2654435761) >>> 0) / 4294967296) * 6.2831853;
-                const flicker = 0.85 + 0.10 * Math.sin(renderTimeSec * 9.0 + fph)
-                                     + 0.05 * Math.sin(renderTimeSec * 16.0 + fph * 2.3);
+                const hs2 = ((i * 2654435761) >>> 0) / 4294967296, fph = hs2 * 6.2831853;
+                const ft = fireType[i], T = ft ? FIRE_TYPES[ft] : null;
+                const tt = renderTimeSec * (T ? T.spd : 1);          // each style burns at its own tempo
+                // Every cell flickers at its OWN two frequencies (it used to be one shared
+                // pair, so the whole fire beat together), and a short-wavelength ripple travels
+                // across the fire (a few cells per crest) so neighbours are always out of step —
+                // a long wavelength would make a small fire breathe as one.
+                const wave = 0.07 * Math.sin(renderTimeSec * 1.7 - (x * 0.85 + y * 0.62))
+                           + 0.04 * Math.sin(renderTimeSec * 0.9 + (x * 0.47 - y * 0.80));
+                const flicker = 0.85 + 0.10 * Math.sin(tt * (6.5 + 6.0 * hs2) + fph)
+                                     + 0.05 * Math.sin(tt * (12 + 9 * (((i * 40503) & 255) / 255)) + fph * 2.3) + wave;
                 // Flame radius grows with intensity; a clustered blaze flares larger
                 // glowSizeBoost (>1 only when cells are being skipped) enlarges the
                 // drawn blobs so they cover the skipped neighbours → seamless glow.
                 const baseR = (isTree ? cell * 0.80 : cell * 0.46) * glowSizeBoost;
                 // Lower size floor so a young smoldering cell is a tiny flame,
                 // growing to full size as intensity climbs.
-                const flameR = baseR * (0.12 + intensity * 1.02) * (1 + heat * 0.5) * flicker;
+                const flameR = baseR * (0.12 + intensity * 1.02) * (1 + heat * 0.5) * flicker * (T ? 0.9 + 0.1 * T.h : 1);
                 const jx = isTree ? jitterX[i] : 0;
                 const jy = isTree ? jitterY[i] : 0;
-                const swayP = Math.sin(renderTimeSec * 4.5 + fph * 1.7) * cell * 0.14;
+                const swayP = Math.sin(tt * (3.2 + 2.8 * hs2) + fph * 1.7) * cell * 0.14;
                 const cxP = x * cell + cell * 0.5 + jx + swayP;
                 const cyP = y * cell + cell * 0.5 + jy;
 
@@ -6082,7 +6172,7 @@ function renderScene() {
                     // Per-cell warm-hue variety so a field of low flames reads as a
                     // living ember bed (deep-red ↔ ember-orange ↔ amber).
                     const hsh = ((i * 2654435761) >>> 0) / 4294967296;
-                    const vhue = (hsh + 0.5 + Math.sin(renderTimeSec * 2.2 + hsh * 33) * 0.18) % 1;
+                    const vhue = (hsh + 0.5 + Math.sin(renderTimeSec * (1.5 + 1.4 * hs2) + hsh * 33) * 0.18) % 1;
                     let oG = (40 + vhue * 95 + intensity * 95 + heat * 55) | 0;
                     let oB = (6  + vhue * 22 + hot * 80) | 0;
                     // Asymmetric lifecycle: a BUILDING fire stays warm orange/yellow;
@@ -6095,7 +6185,7 @@ function renderScene() {
                     // Breathing — low/dying fire pulses slowly instead of a steady disc;
                     // fades out as the blaze builds.
                     const lowAmt = Math.max(0, 1 - intensity * 1.5);
-                    const breathe = 1 - lowAmt * 0.42 * (0.5 - 0.5 * Math.sin(renderTimeSec * 1.9 + hsh * 28));
+                    const breathe = 1 - lowAmt * 0.42 * (0.5 - 0.5 * Math.sin(renderTimeSec * (1.1 + 1.6 * hs2) + hsh * 28));
 
                     // Creeping front — a low-intensity cell touching fresh fuel glows
                     // brighter (the bright leading line of a spreading fire).
@@ -6108,17 +6198,26 @@ function renderScene() {
                     }
                     const frontBoost = front ? (1 + lowAmt * 0.6) : 1;
 
+                    // A style pulls each layer toward its own colour; the pull fades as the
+                    // fire dies, so every style cools to the same dull coals at the end.
+                    const lv = T ? 0.50 + 0.35 * intensity : 1, keep = 1 - dying * 0.55;
+                    const ga = T ? 0.82 : 1;     // styled fire glows a little softer, so its colour survives the additive pile-up
+
                     // Wide soft ember-bed — neighbouring low fires merge into a front.
                     // (Extra layer — skipped for most cells in a dense blaze; see glowExtra.)
                     if (glowExtra) {
                         const bedR = (isTree ? cell * 0.95 : cell * 0.74) * (0.62 + intensity * 0.7) * (1 + heat * 0.4) * glowSizeBoost;
-                        emitGlow(cxP, cyP, bedR, bedR, 230 + (vhue * 25) | 0, (oG * 0.62) | 0, (oB * 0.5) | 0,
-                                 Math.min(1, (0.20 + intensity * 0.22) * breathe * frontBoost));
+                        let bR = (230 + vhue * 25) | 0, bG = (oG * 0.62) | 0, bB = (oB * 0.5) | 0;
+                        if (T) { tintFire(bR, bG, bB, T.bed, lv, keep); bR = TINT[0] | 0; bG = TINT[1] | 0; bB = TINT[2] | 0; }
+                        emitGlow(cxP, cyP, bedR, bedR, bR, bG, bB,
+                                 Math.min(1, (0.20 + intensity * 0.22) * breathe * frontBoost * ga));
                     }
 
                     // Mid flame — the warm hue, at the flame radius (ALWAYS drawn)
-                    emitGlow(cxP, cyP, flameR, flameR, 255, oG, oB,
-                             Math.min(1, (0.5 + intensity * 0.3) * breathe));
+                    let mR = 255, mG = oG, mB = oB;
+                    if (T) { tintFire(mR, mG, mB, T.mid, lv, keep); mR = TINT[0] | 0; mG = TINT[1] | 0; mB = TINT[2] | 0; }
+                    emitGlow(cxP, cyP, flameR, flameR, mR, mG, mB,
+                             Math.min(1, (0.5 + intensity * 0.3) * breathe * ga));
 
                     // Bright core — warm amber/white-hot; cools with the dying tail.
                     // (Extra layer — skipped for most cells in a dense blaze; see glowExtra.)
@@ -6126,8 +6225,10 @@ function renderScene() {
                         let iG = (150 + hot * 70 - dying * 64) | 0;
                         let iB = (45 + hot * 90 - dying * 40) | 0;
                         if (iG < 30) iG = 30; if (iB < 5) iB = 5;
-                        emitGlow(cxP, cyP, flameR * 0.5, flameR * 0.5, 255, iG, iB,
-                                 Math.min(1, (0.40 + intensity * 0.35) * breathe * frontBoost));
+                        let cR = 255, cG = iG, cB = iB;
+                        if (T) { tintFire(cR, cG, cB, T.core, lv, keep); cR = TINT[0] | 0; cG = TINT[1] | 0; cB = TINT[2] | 0; }
+                        emitGlow(cxP, cyP, flameR * 0.5, flameR * 0.5, cR, cG, cB,
+                                 Math.min(1, (0.40 + intensity * 0.35) * breathe * frontBoost * ga));
                     }
                 }
             }
@@ -6229,40 +6330,60 @@ function renderScene() {
             if (kind === 1)      { hMul = 3.9; wMul = 0.7; taper = 0.84; curlMul = 1.3; } // tall wispy
             else if (kind === 2) { hMul = 2.0; wMul = 1.35; taper = 0.6;  curlMul = 0.6; } // wide squat
             else if (kind === 3) { hMul = 3.1; wMul = 0.9; taper = 0.78; curlMul = 2.2; } // curly licker
+            else if (kind === 4) { hMul = 3.3; wMul = 0.72; taper = 0.80; curlMul = 1.2; } // forked: two prongs
+            else if (kind === 5) { hMul = 1.55; wMul = 1.6; taper = 0.50; curlMul = 0.45; } // low rolling flame
+            const T = p.ft ? FIRE_TYPES[p.ft] : null;
+            if (T) { hMul *= T.h; wMul *= T.w; curlMul *= T.curl; }
             if (p.flare) { hMul *= 1.5; }
-            const tongueH = p.size * hMul;
-            // Calmer brightness pulse (p.phase advances ~4.8Hz; halving it → ~2.4Hz)
+            // Calmer brightness pulse; p.phase advances at THIS plume's own speed (p.ps),
+            // so neighbouring tongues drift in and out of step instead of pulsing together.
             const flick = 0.78 + 0.22 * Math.sin(p.phase * 0.5);
-            for (let sgi = 0; sgi < SEGS; sgi++) {
-                const t = sgi / (SEGS - 1);                 // 0 base → 1 tip
-                const segY = py - tongueH * t;
-                // dancing waver + a wind-driven curl that grows toward the tip
-                const waver = Math.sin(p.phase * 0.6 + t * 3.4) * p.size * 0.5 * t * curlMul;
-                const curl  = (p.curl + windLean * 0.8) * p.size * t * t * curlMul;
-                const segX = px + waver + curl;
-                const segR = Math.max(0.5, p.size * wMul * (1.0 - t * taper));
-                const alpha = a * (0.42 - t * 0.12) * flick;
-                if (alpha <= 0) continue;
-                let r, g, b;
-                let segAlpha = alpha;
-                if (p.mtype) {
-                    // magic flame: stays a saturated hue, only lightening to a
-                    // pastel of its own colour at the tip (never pure white), so
-                    // the colour reads even amid bright normal flames.
-                    const mc = MAGIC_FIRE[p.mtype - 1];
-                    const tt = Math.pow(t, 1.6) * 0.55;
-                    r = (mc[0] + (255 - mc[0]) * tt) | 0;
-                    g = (mc[1] + (255 - mc[1]) * tt) | 0;
-                    b = (mc[2] + (255 - mc[2]) * tt) | 0;
-                    segAlpha = alpha * 1.25;
-                } else {
-                    // normal: red base → orange → yellow → white (blue-white hottest)
-                    r = 255;
-                    g = (50 + t * t * 185 + hot * 25) | 0;
-                    b = (6 + Math.pow(t, 2.6) * 215 + hot * 70) | 0;
-                    if (g > 255) g = 255; if (b > 255) b = 255;
+            const prongs = kind === 4 ? 2 : 1;
+            for (let pr = 0; pr < prongs; pr++) {
+                // a fork's second prong: shorter, thinner, leaning the other way
+                const pk = pr ? 0.62 : 1, lean = pr ? -1.5 : 1, xo = pr ? -p.size * 0.5 : 0;
+                const tongueH = p.size * hMul * pk;
+                for (let sgi = 0; sgi < SEGS; sgi++) {
+                    const t = sgi / (SEGS - 1);                 // 0 base → 1 tip
+                    const segY = py - tongueH * t;
+                    // dancing waver + a wind-driven curl that grows toward the tip (a roller
+                    // also rolls from side to side)
+                    const waver = Math.sin(p.phase * 0.6 + t * 3.4 + pr * 2.1) * p.size * 0.5 * t * curlMul
+                                + (kind === 5 ? Math.sin(p.phase * 0.35 + t) * p.size * 0.8 : 0);
+                    const curl  = (p.curl * lean + windLean * 0.8) * p.size * t * t * curlMul;
+                    const segX = px + xo * (1 - t) + waver + curl;   // the prongs meet at the base
+                    const segR = Math.max(0.5, p.size * wMul * pk * (1.0 - t * taper));
+                    const alpha = a * (0.42 - t * 0.12) * flick * (pr ? 0.8 : 1);
+                    if (alpha <= 0) continue;
+                    let r, g, b;
+                    let segAlpha = alpha;
+                    if (p.mtype) {
+                        // magic flame: stays a saturated hue, only lightening to a
+                        // pastel of its own colour at the tip (never pure white), so
+                        // the colour reads even amid bright normal flames.
+                        const mc = MAGIC_FIRE[p.mtype - 1];
+                        const tt = Math.pow(t, 1.6) * 0.55;
+                        r = (mc[0] + (255 - mc[0]) * tt) | 0;
+                        g = (mc[1] + (255 - mc[1]) * tt) | 0;
+                        b = (mc[2] + (255 - mc[2]) * tt) | 0;
+                        segAlpha = alpha * 1.25;
+                    } else if (T) {
+                        // a style's own base → body → tip ramp, whitened a little by heat
+                        const R = T.ramp, u = t < 0.42 ? t / 0.42 : (t - 0.42) / 0.58;
+                        const c0 = t < 0.42 ? R[0] : R[1], c1 = t < 0.42 ? R[1] : R[2];
+                        const wh = hot * 0.22 * t;
+                        r = c0[0] + (c1[0] - c0[0]) * u; g = c0[1] + (c1[1] - c0[1]) * u; b = c0[2] + (c1[2] - c0[2]) * u;
+                        r = (r + (255 - r) * wh) | 0; g = (g + (255 - g) * wh) | 0; b = (b + (255 - b) * wh) | 0;
+                        segAlpha = alpha * 0.95;
+                    } else {
+                        // normal: red base → orange → yellow → white (blue-white hottest)
+                        r = 255;
+                        g = (50 + t * t * 185 + hot * 25) | 0;
+                        b = (6 + Math.pow(t, 2.6) * 215 + hot * 70) | 0;
+                        if (g > 255) g = 255; if (b > 255) b = 255;
+                    }
+                    emitFx(segX, segY, segR, segR, r, g, b, segAlpha);
                 }
-                emitFx(segX, segY, segR, segR, r, g, b, segAlpha);
             }
         }
         if (!glowGPU) ctx.restore();
@@ -6279,8 +6400,10 @@ function renderScene() {
             // sparks strobe, since px jumps several px/frame — that read as flicker
             // at the spreading front when a fire starts.)
             if (p.ph === undefined) p.ph = Math.random() * 6.2831853;
-            const tw = 0.74 + 0.26 * Math.sin(renderTimeSec * 7 + p.ph);
-            emitFx(px, py, p.size, p.size, 255, (220 + a * 35) | 0, (140 * a) | 0, a * tw);
+            const tw = 0.74 + 0.26 * Math.sin(renderTimeSec * (5.5 + 3 * (p.ph / 6.2832)) + p.ph);
+            let sR = 255, sG = (220 + a * 35) | 0, sB = (140 * a) | 0;
+            if (p.ft) { tintFire(sR, sG, sB, FIRE_TYPES[p.ft].core, 0.9, 1); sR = TINT[0] | 0; sG = TINT[1] | 0; sB = TINT[2] | 0; }
+            emitFx(px, py, p.size, p.size, sR, sG, sB, a * tw);
         }
         if (!glowGPU) ctx.restore();
     }
@@ -6292,19 +6415,29 @@ function renderScene() {
         for (const p of embers) {
             const px = drawX(p), py = drawY(p);
             const a = Math.min(1, p.life);
-            const tw = 0.75 + 0.25 * Math.sin((p.phase || 0) + renderTimeSec * 6.5); // soft slow pulse
+            // soft slow pulse, each ember at its own rate
+            const tw = 0.75 + 0.25 * Math.sin((p.phase || 0) + renderTimeSec * (4.5 + 4 * ((p.phase || 0) % 1)));
+            const eT = p.ft ? FIRE_TYPES[p.ft] : null;
+            let hR = 255, hG = (130 + a * 70) | 0, hB = (40 * a) | 0;                // halo
+            let kR = 255, kG = (120 + a * 100) | 0, kB = (20 * a) | 0;               // comet trail
+            let cR = 255, cG = (225 + a * 30) | 0, cB = (160 * a) | 0;               // bright core
+            if (eT) {
+                tintFire(hR, hG, hB, eT.mid, 0.85, 1); hR = TINT[0] | 0; hG = TINT[1] | 0; hB = TINT[2] | 0;
+                tintFire(kR, kG, kB, eT.mid, 0.85, 1); kR = TINT[0] | 0; kG = TINT[1] | 0; kB = TINT[2] | 0;
+                tintFire(cR, cG, cB, eT.core, 0.9, 1); cR = TINT[0] | 0; cG = TINT[1] | 0; cB = TINT[2] | 0;
+            }
             // soft glow halo
-            emitFx(px, py, p.size * 3.4, p.size * 3.4, 255, (130 + a * 70) | 0, (40 * a) | 0, a * 0.16 * tw);
+            emitFx(px, py, p.size * 3.4, p.size * 3.4, hR, hG, hB, a * 0.16 * tw);
             // comet trail — GPU: a short stack of fading blobs along -velocity
             // (instancing has no line primitive); 2D: the original round stroke.
             if (glowGPU) {
                 for (let tt = 0; tt < 1.001; tt += 0.5) {
                     emitFx(px - p.vx * 2.4 * (1 - tt), py - p.vy * 2.4 * (1 - tt),
-                           p.size * 0.55, p.size * 0.55, 255, (120 + a * 100) | 0, (20 * a) | 0, a * 0.32);
+                           p.size * 0.55, p.size * 0.55, kR, kG, kB, a * 0.32);
                 }
             } else {
                 ctx.lineWidth = p.size * 0.9;
-                ctx.strokeStyle = rgbQ(255, (120 + a * 100) | 0, (20 * a) | 0);
+                ctx.strokeStyle = rgbQ(kR, kG, kB);
                 ctx.globalAlpha = a * 0.45;
                 ctx.beginPath();
                 ctx.moveTo(px - p.vx * 2.4, py - p.vy * 2.4);
@@ -6312,7 +6445,7 @@ function renderScene() {
                 ctx.stroke();
             }
             // bright core
-            emitFx(px, py, p.size, p.size, 255, (225 + a * 30) | 0, (160 * a) | 0, a * tw);
+            emitFx(px, py, p.size, p.size, cR, cG, cB, a * tw);
         }
         if (!glowGPU) ctx.restore();
     }
@@ -7002,6 +7135,7 @@ function applyProperty(key, raw) {
         case "rgbEdgeStrength":
         case "audioIntensity":
         case "magicFire":
+        case "fireVariety":
         case "panX":
         case "panY":
         case "panSpeed":
