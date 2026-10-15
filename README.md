@@ -165,7 +165,26 @@ Features:
   stays calm and green, with the odd wildfire rolling in on a passing storm — you
   start the rest yourself by clicking. (Toggle/rate under **Natural fires** in the WE
   properties.)
-- Cloud shadows drift across ground (off by default — toggle in properties)
+- **Living sky** — the weather has two layers. The wet↔dry stages above drive rain,
+  lightning and fire; on top of them sits a **mood** that changes the light and the air:
+  - **Fog** — drifting banks of mist (two parallax layers) that soften every contrast;
+    flames glow *through* it and bloom brighter; wind stills, fireflies drift out.
+  - **Windy** — a gale: trees sway hard, leaves swirl, wind streaks thicken, gusts come
+    far more often, clouds race.
+  - **Sunset** — golden light with a low sun's glare bleeding in from a corner, warm on
+    the land and the water (and likelier right after rain).
+  - **Night** — a deep moonlit blue with fireflies swarming, mushrooms glowing and fire
+    blazing against the dark. Selectable any time; in the auto-cycle only if you opt in.
+  Each is a continuous level that eases in and out over ~20–60 s — **nothing snaps**:
+  the fire-spread multiplier, drought haze, wind and rain escalation all glide too
+  (they used to jump when the weather changed stage).
+- **Drifting cloud shadows** (on by default) — soft dark masses slide across the forest
+  with the wind, falling on the canopy as well as the ground. A faint dapple under a
+  clear sky, heavy as cover builds, gone at night. One scrolling noise texture, so it's
+  nearly free at any resolution.
+- **Rain ripples** — raindrops ring the ponds and rivers with widening circles.
+- **Rainbow** — after a storm clears, a soft rainbow rises over the forest, lingers a
+  minute or two, and fades.
 - Bird flocks in V-formation that **steer around active fires**, each bird a
   gull-wing silhouette that **beats its wings** (droop → glide → upstroke)
 - **Ground critters** — a few deer and rabbits graze and wander the clearings on
@@ -384,7 +403,7 @@ Organized into sections in the Wallpaper Engine picker:
 | Fire | Spread rate, Tree burn duration, Grass burn duration, Fire glow, Flame plumes, Embers, Smoke |
 | Wind | Wind strength, Wind rotation speed, Wind streaks, Drifting leaves |
 | Seasons | Season (auto/spring/summer/autumn/winter), Season length (auto-cycle), Winter snow intensity |
-| Weather | Mode (auto/drought/clear/cloudy/rain/monsoon/storm), Front direction (LTR/RTL/TTB/BTT/static), Transition speed, Cloud shadows, Rain intensity, Rain scatter, Rain extinguishes |
+| Weather | Mode (auto/drought/clear/cloudy/rain/monsoon/storm/fog/windy/sunset/night), Front direction (LTR/RTL/TTB/BTT/static), Transition speed, Drifting cloud shadows, Include night in auto-cycle, Rain intensity, Rain scatter, Rain extinguishes |
 | Auto-ignition & regrowth | Auto-ignite, Auto-ignite rate, Regrowth, Regrowth rate |
 | Atmosphere | Birds, Fireflies, Fish shadows, Ground critters (deer/rabbits), Butterflies & dragonflies, Screen effects toggle, Wind gusts, Starter fire on load |
 | Audio reactivity | React to system audio, Audio strength |

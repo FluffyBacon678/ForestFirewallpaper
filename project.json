@@ -294,7 +294,11 @@
                     { "label": "Cloudy",                        "value": "cloudy"  },
                     { "label": "Rain",                          "value": "rain"    },
                     { "label": "Monsoon (heavy rain)",          "value": "monsoon" },
-                    { "label": "Storm (rain + lightning)",      "value": "storm"   }
+                    { "label": "Storm (rain + lightning)",      "value": "storm"   },
+                    { "label": "Fog (drifting mist)",           "value": "fog"     },
+                    { "label": "Windy (gusts, swirling leaves)","value": "windy"   },
+                    { "label": "Sunset (golden light)",         "value": "sunset"  },
+                    { "label": "Night (moonlit, fireflies)",    "value": "night"   }
                 ]
             },
             "weatherDirection": {
@@ -321,7 +325,13 @@
             },
             "showClouds": {
                 "order": 44,
-                "text":   "Cloud shadows on ground (default off)",
+                "text":   "Drifting cloud shadows",
+                "type":   "bool",
+                "value":  true
+            },
+            "autoNight": {
+                "order": 44.5,
+                "text":   "Include NIGHT in the weather auto-cycle (dark)",
                 "type":   "bool",
                 "value":  false
             },
